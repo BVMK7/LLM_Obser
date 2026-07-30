@@ -130,5 +130,15 @@ jobs:
           git config user.name "eval-gate-bot"
           git config user.email "actions@github.com"
           git add eval/eval-baseline.json
-          git diff --staged --quiet || git commit -m "chore: update eval baseline [skip ci]"
-          git push
+          if git diff --staged --quiet; then
+            echo "No baseline changes to commit."
+          else
+            git commit -m "chore: update eval baseline [skip ci]"
+            # This job checked out the commit that triggered it, which may
+            # already be behind main (e.g. a re-run of an old run, or a fast
+            # second push) — rebase onto the current tip before pushing so
+            # this doesn't fail as a non-fast-forward push.
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
+          fi
