@@ -7,7 +7,7 @@
     "relevance": null,
     "latency_ms": 0,
     "cost": 0.0,
-    "error": "Connection error."
+    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
   },
   {
     "question": "What is 12 + 30?",
@@ -17,7 +17,7 @@
     "relevance": null,
     "latency_ms": 0,
     "cost": 0.0,
-    "error": "Connection error."
+    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
   },
   {
     "question": "What is the chemical symbol for gold?",
@@ -27,7 +27,7 @@
     "relevance": null,
     "latency_ms": 0,
     "cost": 0.0,
-    "error": "Connection error."
+    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
   },
   {
     "question": "Who wrote Romeo and Juliet?",
@@ -37,7 +37,7 @@
     "relevance": null,
     "latency_ms": 0,
     "cost": 0.0,
-    "error": "Connection error."
+    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
   },
   {
     "question": "What planet is known as the Red Planet?",
@@ -47,6 +47,6 @@
     "relevance": null,
     "latency_ms": 0,
     "cost": 0.0,
-    "error": "Connection error."
+    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
   }
 ]
