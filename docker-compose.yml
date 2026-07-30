@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: llm-observability-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: llm_observability
+      POSTGRES_PASSWORD: llm_observability
+      POSTGRES_DB: llm_observability
+    ports:
+      - "5433:5432"
+    volumes:
+      - llm_observability_data:/var/lib/postgresql/data
+
+volumes:
+  llm_observability_data:

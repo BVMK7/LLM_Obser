@@ -1,0 +1,93 @@
+@import "tailwindcss";
+
+/* Design tokens — Neon Tokyo Labs palette.
+   Every component reads colors through these variables (not literal hex)
+   so toggling [data-theme] on <html> reskins the whole app instantly. */
+:root {
+  --bg-app: #0a0a12;
+  --bg-sidebar: #111119;
+  --bg-card: #15161f;
+  --bg-input: #0f0f18;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+
+  --text-primary: #ffffff;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+
+  /* Primary is a vivid sky-blue at the same ~198° hue as the ambient glow
+     below (rgba(56, 120, 148, ...) = #387894), just brighter/more saturated
+     for use as a UI accent — keeps buttons/links/active-states visually
+     "of a piece" with the background lighting instead of clashing with it.
+     Validated against success/danger/warning via this repo's dataviz skill
+     (scripts/validate_palette.js): CVD ΔE 13.1, normal-vision ΔE 18.7 —
+     both comfortably above the safe thresholds. */
+  --brand-primary: #0ea5e9;
+  --brand-primary-hover: #0284c7;
+  --brand-success: #2dd9b5;
+  --brand-warning: #ffb020;
+  --brand-danger: #ff4d5e;
+
+  --glow-opacity: 0.45;
+}
+
+:root[data-theme="light"] {
+  --bg-app: #f5f5f8;
+  --bg-sidebar: #ffffff;
+  --bg-card: #ffffff;
+  --bg-input: #f1f1f5;
+  --border-subtle: rgba(0, 0, 0, 0.08);
+
+  --text-primary: #16161d;
+  --text-secondary: #52525b;
+  --text-muted: #71717a;
+  /* brand accents stay the same in both themes */
+
+  --glow-opacity: 0.25;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Ambient side-lighting backdrop for the app shell (App.jsx's root div) —
+   a single indigo glow rising from the bottom of the viewport, fixed in
+   place so it reads as room lighting rather than scrolling with the page. */
+.app-shell {
+  position: relative;
+  background-color: var(--bg-app);
+}
+
+.app-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: radial-gradient(ellipse 1600px 1000px at 50% 100%, rgba(56, 120, 148, var(--glow-opacity)), transparent 70%);
+}
+
+.app-shell > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Frosted-glass treatment for every panel that uses the shared card token
+   (Tailwind's arbitrary-value class literally contains this substring in
+   the rendered HTML, so this matches without touching every component). */
+[class*="bg-[var(--bg-card)]"] {
+  background-color: color-mix(in srgb, var(--bg-card) 88%, transparent) !important;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* Sharp-edged aesthetic: flatten every Tailwind rounded-* utility (cards,
+   buttons, pills, inputs, avatar) from one place instead of stripping the
+   class from every call site. */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+}
