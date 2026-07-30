@@ -77,6 +77,17 @@ jobs:
             sleep 1
           done
 
+      # A prior run failed every case with "Connection error." reaching Groq
+      # from this runner (see providers.py's _call_with_retries comment) —
+      # this hits Groq directly, independent of our app, so a repeat gives a
+      # real network-level diagnosis (DNS/TCP/TLS) instead of another guess.
+      - name: Diagnose connectivity to Groq
+        run: |
+          echo "--- DNS ---"
+          getent hosts api.groq.com || true
+          echo "--- HTTPS reachability (expect a JSON body or a clear HTTP error, not a hang) ---"
+          curl -v --max-time 15 https://api.groq.com/openai/v1/models -H "Authorization: Bearer $GROQ_API_KEY" || true
+
       - name: Run eval gate (PR)
         if: github.event_name == 'pull_request'
         run: python scripts/run_eval_gate.py

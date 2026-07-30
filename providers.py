@@ -9,6 +9,7 @@ so the caller can log a trace the same way regardless of which provider ran.
 """
 
 import os
+import time
 
 from dotenv import load_dotenv
 
@@ -21,6 +22,27 @@ def _normalize_messages(messages):
     if isinstance(messages, str):
         return [{"role": "user", "content": messages}]
     return messages
+
+
+# Observed in practice: a provider call can fail with a transient connection
+# error (e.g. groq.APIConnectionError: "Connection error.") specifically from
+# some CI/cloud environments while working fine from a normal dev machine —
+# see https://github.com/swarmauri/swarmauri-sdk/issues/519 for another
+# report of the identical symptom, root cause unconfirmed. Retrying a couple
+# times absorbs a transient blip regardless of the underlying cause; anything
+# else (bad API key, invalid request) isn't connection-shaped and fails fast.
+def _call_with_retries(fn, max_attempts=3, backoff_seconds=1.5):
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if "connection" not in type(e).__name__.lower() and "connection" not in str(e).lower():
+                raise
+            if attempt < max_attempts - 1:
+                time.sleep(backoff_seconds * (attempt + 1))
+    raise last_exc
 
 
 def call_gemini(messages, model="gemini-3.5-flash", temperature=None, top_p=None):
@@ -51,7 +73,7 @@ def call_gemini(messages, model="gemini-3.5-flash", temperature=None, top_p=None
         top_p=top_p,
     )
 
-    response = client.models.generate_content(model=model, contents=contents, config=config)
+    response = _call_with_retries(lambda: client.models.generate_content(model=model, contents=contents, config=config))
 
     answer = response.text
     usage = response.usage_metadata
@@ -69,11 +91,11 @@ def call_groq(messages, model="llama-3.1-8b-instant", temperature=None, top_p=No
     if top_p is not None:
         kwargs["top_p"] = top_p
 
-    response = client.chat.completions.create(
+    response = _call_with_retries(lambda: client.chat.completions.create(
         model=model,
         messages=_normalize_messages(messages),
         **kwargs,
-    )
+    ))
 
     answer = response.choices[0].message.content
     usage = response.usage
@@ -96,11 +118,11 @@ def call_openrouter(messages, model="google/gemma-4-26b-a4b-it:free", temperatur
     if top_p is not None:
         kwargs["top_p"] = top_p
 
-    response = client.chat.completions.create(
+    response = _call_with_retries(lambda: client.chat.completions.create(
         model=model,
         messages=_normalize_messages(messages),
         **kwargs,
-    )
+    ))
 
     answer = response.choices[0].message.content
     usage = response.usage
