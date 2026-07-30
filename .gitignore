@@ -14,3 +14,7 @@ uvicorn_err.log
 
 # Large local-only reference asset, not project source
 *.mp4
+
+# Eval gate: transient output, regenerated every run — the baseline
+# (eval/eval-baseline.json) IS committed, this summary is not.
+eval_summary.md

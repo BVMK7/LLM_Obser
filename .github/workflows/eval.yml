@@ -1,0 +1,134 @@
+name: Eval Gate
+
+# Our own equivalent of Braintrust's eval-action
+# (https://github.com/braintrustdata/eval-action), adapted to run against
+# this project's own FastAPI backend instead of the Braintrust SDK/API:
+# on a pull request it runs the checked-in eval suite (eval/ci_cases.json)
+# and posts the results as a PR comment, diffed against the committed
+# baseline (eval/eval-baseline.json); on a push to main it re-runs the suite
+# and commits the new baseline, so the next PR diffs against up-to-date numbers.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Needed to post/update the PR comment (pull_request) and to push the
+# baseline commit back (push to main).
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: llm_observability
+          POSTGRES_PASSWORD: llm_observability
+          POSTGRES_DB: llm_observability
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://llm_observability:llm_observability@localhost:5433/llm_observability
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # Only groq by default — the fastest/most quota-reliable provider in
+      # practice for this app (see providers.py) — a broader/slower gate is
+      # an opt-in change to this env var, not the default.
+      EVAL_PROVIDERS: groq
+      FAIL_ON_REGRESSION: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: pip install -r requirements.txt requests
+
+      - name: Apply database migrations
+        run: |
+          for f in create_traces.sql create_spans.sql create_scores.sql create_prompts.sql \
+                   create_datasets.sql add_model_to_traces.sql create_scorers.sql \
+                   create_experiments.sql create_prompt_versions.sql create_alert_rules.sql \
+                   add_review_and_span_hierarchy.sql; do
+            PGPASSWORD=llm_observability psql -h localhost -p 5433 -U llm_observability -d llm_observability -f "$f"
+          done
+
+      - name: Start backend
+        run: |
+          python -m uvicorn main:app --port 8010 > uvicorn.log 2>&1 &
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8010/providers/status && break
+            sleep 1
+          done
+
+      - name: Run eval gate (PR)
+        if: github.event_name == 'pull_request'
+        run: python scripts/run_eval_gate.py
+
+      - name: Run eval gate and update baseline (push to main)
+        if: github.event_name == 'push'
+        run: python scripts/run_eval_gate.py --update-baseline
+
+      - name: Show backend log on failure
+        if: failure()
+        run: cat uvicorn.log
+
+      # Finds and updates the same PR comment on re-runs (matched by the
+      # hidden marker) instead of posting a new one every push.
+      - name: Post or update PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('eval_summary.md', 'utf8');
+            const marker = '<!-- eval-gate-comment -->';
+            const commentBody = `${marker}\n${body}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: commentBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody,
+              });
+            }
+
+      - name: Commit updated baseline
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "eval-gate-bot"
+          git config user.email "actions@github.com"
+          git add eval/eval-baseline.json
+          git diff --staged --quiet || git commit -m "chore: update eval baseline [skip ci]"
+          git push
