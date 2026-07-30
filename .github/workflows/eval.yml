@@ -74,6 +74,15 @@ jobs:
       - name: Install backend dependencies
         run: pip install -r requirements.txt requests
 
+      # Reproduces providers.call_groq's exact call path (bypassing our own
+      # FastAPI layer entirely) and prints the FULL exception chain — the
+      # groq SDK collapses several distinct root causes (network failure,
+      # bad key, even a malformed/empty Authorization header) into the same
+      # generic "Connection error." string, which is why this has taken
+      # several guesses to pin down. This step exists to stop guessing.
+      - name: Diagnose Groq client directly
+        run: python scripts/diagnose_groq.py
+
       - name: Apply database migrations
         run: |
           for f in create_traces.sql create_spans.sql create_scores.sql create_prompts.sql \
