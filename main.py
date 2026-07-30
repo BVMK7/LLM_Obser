@@ -994,6 +994,10 @@ class EvalCaseResult(BaseModel):
     cost: float
     latency_ms: int
     trace_id: Optional[uuid.UUID]
+    # Set only when the provider call itself raised — the actual exception
+    # text, so a failed case is diagnosable from the API response alone
+    # instead of silently returning zeros with no trace to inspect.
+    error: Optional[str] = None
 
 
 class EvalResponse(BaseModel):
@@ -1110,6 +1114,7 @@ def _run_eval_case(case: EvalCase, provider: str, db: Session, scorers: Optional
             cost=0.0,
             latency_ms=0,
             trace_id=None,
+            error=str(e),
         )
 
     ended_at = datetime.now(timezone.utc)

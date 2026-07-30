@@ -58,6 +58,7 @@ def run_case(case: dict, provider: str) -> dict:
         "relevance": result["relevance"],
         "latency_ms": result["latency_ms"],
         "cost": result["cost"],
+        "error": result.get("error"),
     }
 
 
@@ -145,6 +146,14 @@ def main():
             lines.append(f"- `{r['provider']}` — {r['question']}")
     else:
         lines.append("No regressions vs. baseline.")
+
+    errored = [r for r in results if r.get("error")]
+    if errored:
+        lines.append("")
+        lines.append(f"### 🛑 {len(errored)} case(s) failed to call the provider at all")
+        lines.append("These aren't graded regressions — the provider call itself raised an exception:")
+        for r in errored:
+            lines.append(f"- `{r['provider']}` — {r['question']}: `{r['error']}`")
 
     summary = "\n".join(lines)
     SUMMARY_PATH.write_text(summary, encoding="utf-8")
