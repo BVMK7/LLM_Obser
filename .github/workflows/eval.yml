@@ -51,6 +51,20 @@ jobs:
       FAIL_ON_REGRESSION: "false"
 
     steps:
+      # The diagnostic step below proved DNS/TCP/TLS all reach Groq fine over
+      # IPv4 via curl, while the Python groq SDK still threw a bare
+      # "Connection error." — a known class of issue on GitHub-hosted
+      # runners: IPv6 is advertised but not always reliably routable, and
+      # unlike curl's "happy eyeballs", most Python HTTP clients don't
+      # automatically fall back from a broken IPv6 route to IPv4 (see
+      # actions/runner#2739, actions/runner-images#668, aio-libs/aiohttp#6496
+      # for the same class of failure). Force IPv4-only so Python takes the
+      # same path curl already proved works.
+      - name: Force IPv4 (avoid a broken/unreliable IPv6 route on this runner)
+        run: |
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
