@@ -2,51 +2,51 @@
   {
     "question": "What is the capital of France?",
     "provider": "groq",
-    "passed": false,
-    "faithfulness": null,
-    "relevance": null,
-    "latency_ms": 0,
-    "cost": 0.0,
-    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
+    "passed": true,
+    "faithfulness": 1.0,
+    "relevance": 1.0,
+    "latency_ms": 287,
+    "cost": 2.74e-06,
+    "error": null
   },
   {
     "question": "What is 12 + 30?",
     "provider": "groq",
-    "passed": false,
-    "faithfulness": null,
-    "relevance": null,
-    "latency_ms": 0,
-    "cost": 0.0,
-    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
+    "passed": true,
+    "faithfulness": 1.0,
+    "relevance": 1.0,
+    "latency_ms": 133,
+    "cost": 2.87e-06,
+    "error": null
   },
   {
     "question": "What is the chemical symbol for gold?",
     "provider": "groq",
-    "passed": false,
-    "faithfulness": null,
-    "relevance": null,
-    "latency_ms": 0,
-    "cost": 0.0,
-    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
+    "passed": true,
+    "faithfulness": 1.0,
+    "relevance": 1.0,
+    "latency_ms": 95,
+    "cost": 2.95e-06,
+    "error": null
   },
   {
     "question": "Who wrote Romeo and Juliet?",
     "provider": "groq",
-    "passed": false,
-    "faithfulness": null,
-    "relevance": null,
-    "latency_ms": 0,
-    "cost": 0.0,
-    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
+    "passed": true,
+    "faithfulness": 1.0,
+    "relevance": 1.0,
+    "latency_ms": 158,
+    "cost": 6.0500000000000005e-06,
+    "error": null
   },
   {
     "question": "What planet is known as the Red Planet?",
     "provider": "groq",
-    "passed": false,
-    "faithfulness": null,
-    "relevance": null,
-    "latency_ms": 0,
-    "cost": 0.0,
-    "error": "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
+    "passed": true,
+    "faithfulness": 1.0,
+    "relevance": 1.0,
+    "latency_ms": 218,
+    "cost": 5.48e-06,
+    "error": null
   }
 ]
