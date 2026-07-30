@@ -2,46 +2,46 @@
   {
     "question": "What is the capital of France?",
     "provider": "groq",
-    "passed": true,
-    "faithfulness": 1.0,
-    "relevance": 1.0,
-    "latency_ms": 907,
-    "cost": 2.74e-06
+    "passed": false,
+    "faithfulness": null,
+    "relevance": null,
+    "latency_ms": 0,
+    "cost": 0.0
   },
   {
     "question": "What is 12 + 30?",
     "provider": "groq",
-    "passed": true,
-    "faithfulness": 1.0,
-    "relevance": 1.0,
-    "latency_ms": 1284,
-    "cost": 2.79e-06
+    "passed": false,
+    "faithfulness": null,
+    "relevance": null,
+    "latency_ms": 0,
+    "cost": 0.0
   },
   {
     "question": "What is the chemical symbol for gold?",
     "provider": "groq",
-    "passed": true,
-    "faithfulness": 1.0,
-    "relevance": 1.0,
-    "latency_ms": 1064,
-    "cost": 3.67e-06
+    "passed": false,
+    "faithfulness": null,
+    "relevance": null,
+    "latency_ms": 0,
+    "cost": 0.0
   },
   {
     "question": "Who wrote Romeo and Juliet?",
     "provider": "groq",
-    "passed": true,
-    "faithfulness": 0.8,
-    "relevance": 1.0,
-    "latency_ms": 869,
-    "cost": 6.6899999999999995e-06
+    "passed": false,
+    "faithfulness": null,
+    "relevance": null,
+    "latency_ms": 0,
+    "cost": 0.0
   },
   {
     "question": "What planet is known as the Red Planet?",
     "provider": "groq",
-    "passed": true,
-    "faithfulness": 1.0,
-    "relevance": 1.0,
-    "latency_ms": 858,
-    "cost": 5.56e-06
+    "passed": false,
+    "faithfulness": null,
+    "relevance": null,
+    "latency_ms": 0,
+    "cost": 0.0
   }
 ]
