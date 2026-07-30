@@ -6,7 +6,8 @@
     "faithfulness": null,
     "relevance": null,
     "latency_ms": 0,
-    "cost": 0.0
+    "cost": 0.0,
+    "error": "Connection error."
   },
   {
     "question": "What is 12 + 30?",
@@ -15,7 +16,8 @@
     "faithfulness": null,
     "relevance": null,
     "latency_ms": 0,
-    "cost": 0.0
+    "cost": 0.0,
+    "error": "Connection error."
   },
   {
     "question": "What is the chemical symbol for gold?",
@@ -24,7 +26,8 @@
     "faithfulness": null,
     "relevance": null,
     "latency_ms": 0,
-    "cost": 0.0
+    "cost": 0.0,
+    "error": "Connection error."
   },
   {
     "question": "Who wrote Romeo and Juliet?",
@@ -33,7 +36,8 @@
     "faithfulness": null,
     "relevance": null,
     "latency_ms": 0,
-    "cost": 0.0
+    "cost": 0.0,
+    "error": "Connection error."
   },
   {
     "question": "What planet is known as the Red Planet?",
@@ -42,6 +46,7 @@
     "faithfulness": null,
     "relevance": null,
     "latency_ms": 0,
-    "cost": 0.0
+    "cost": 0.0,
+    "error": "Connection error."
   }
 ]
