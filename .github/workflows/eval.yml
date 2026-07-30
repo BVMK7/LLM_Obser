@@ -163,16 +163,22 @@ jobs:
         run: |
           git config user.name "eval-gate-bot"
           git config user.email "actions@github.com"
+          # eval-baseline.json is generated data, not hand-edited content —
+          # there's nothing to "merge" between two computed versions of it,
+          # the newest run's numbers should just win. A rebase tries to
+          # reconcile history and can hit a real conflict when two runs (e.g.
+          # a stale re-run vs. a fresh one) computed different content for
+          # the same file — so instead: save this run's freshly computed
+          # file, reset onto whatever main's current tip actually is, then
+          # reapply it on top. No merge, no conflict, always latest wins.
+          cp eval/eval-baseline.json /tmp/eval-baseline.new.json
+          git fetch origin main
+          git reset --hard origin/main
+          cp /tmp/eval-baseline.new.json eval/eval-baseline.json
           git add eval/eval-baseline.json
           if git diff --staged --quiet; then
             echo "No baseline changes to commit."
           else
             git commit -m "chore: update eval baseline [skip ci]"
-            # This job checked out the commit that triggered it, which may
-            # already be behind main (e.g. a re-run of an old run, or a fast
-            # second push) — rebase onto the current tip before pushing so
-            # this doesn't fail as a non-fast-forward push.
-            git fetch origin main
-            git rebase origin/main
             git push origin HEAD:main
           fi
