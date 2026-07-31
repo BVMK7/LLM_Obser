@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmobs"
+version = "0.1.0"
+description = "Minimal client SDK for the LLM Observability platform — wrap an agent's calls with @client.traced(...) to log traces/spans."
+requires-python = ">=3.9"
+dependencies = ["requests"]
+
+[tool.setuptools]
+packages = ["llmobs"]

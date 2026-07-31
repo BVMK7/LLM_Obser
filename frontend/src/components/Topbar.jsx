@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { useTheme } from "../theme";
+import ProjectSwitcher from "./ProjectSwitcher";
 
 // Full-width chrome bar above the page content. Per product decision, the
 // avatar is static decoration; the theme toggle and (on the Traces page) the
@@ -52,6 +53,7 @@ export default function Topbar() {
       </div>
 
       <div className="flex items-center gap-3">
+        <ProjectSwitcher />
         <button
           onClick={toggleTheme}
           title="Toggle theme"

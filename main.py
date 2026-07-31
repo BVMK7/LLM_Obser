@@ -3,19 +3,21 @@ Minimal FastAPI + SQLAlchemy app for the llm_observability database.
 Run with: uvicorn main:app --reload
 """
 
+import hashlib
 import json
 import os
 import re
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, func
+from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
@@ -46,12 +48,62 @@ def get_db():
         db.close()
 
 
+# A Project is one customer/tenant. Every root-owned resource below (Trace,
+# Dataset, Prompt, Scorer, Experiment, AlertRule) belongs to exactly one
+# Project; child rows (Span, Score, PromptVersion, ExperimentResult) are
+# tenant-scoped transitively through their parent's project_id, not their own
+# column — see get_current_project below for how a request resolves to one.
+class Project(Base):
+    __tablename__ = "projects"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    name = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+
+
+# An ApiKey authenticates a request as belonging to one Project. Only the
+# sha256 hash is stored — the raw key is shown to the caller once, at
+# creation time, and never again (see create_project below).
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    key_hash = Column(String, nullable=False, unique=True)
+    key_prefix = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    revoked_at = Column(DateTime(timezone=True))
+
+
+def _hash_api_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode()).hexdigest()
+
+
+def get_current_project(x_api_key: Optional[str] = Header(None), db: Session = Depends(get_db)) -> Project:
+    """FastAPI dependency: resolves the X-API-Key header to the Project it
+    belongs to. Every tenant-owned endpoint depends on this instead of
+    `get_db` alone — it's what makes one customer's data invisible/
+    unwritable to another customer's key."""
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
+    key_hash = _hash_api_key(x_api_key)
+    api_key = (
+        db.query(ApiKey)
+        .filter(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
+        .first()
+    )
+    if api_key is None:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+    return db.get(Project, api_key.project_id)
+
+
 # 3. SQLAlchemy model — this maps the "traces" table to a Python class.
 # Each class attribute below corresponds to one column in the table.
 class Trace(Base):
     __tablename__ = "traces"
 
     id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
     input = Column(Text)
     output = Column(Text)
@@ -116,6 +168,7 @@ class Dataset(Base):
     __tablename__ = "datasets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
     description = Column(Text)
     cases = Column(JSONB, nullable=False, server_default="[]")
@@ -129,6 +182,7 @@ class Prompt(Base):
     __tablename__ = "prompts"
 
     id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
     category = Column(String, nullable=False, server_default="system")
     content = Column(Text, nullable=False)
@@ -158,10 +212,14 @@ class PromptVersion(Base):
 # a mapping from the judge's chosen label to a 0-1 score.
 class Scorer(Base):
     __tablename__ = "scorers"
+    # Slug only has to be unique within a project — two different customers
+    # can each have their own "correctness" scorer without colliding.
+    __table_args__ = (UniqueConstraint("project_id", "slug", name="uq_scorers_project_slug"),)
 
     id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
-    slug = Column(String, nullable=False, unique=True)
+    slug = Column(String, nullable=False)
     description = Column(Text)
     prompt_template = Column(Text, nullable=False)
     choice_scores = Column(JSONB, nullable=False, server_default="{}")
@@ -177,6 +235,7 @@ class Experiment(Base):
     __tablename__ = "experiments"
 
     id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
     description = Column(Text)
     dataset_id = Column(UUID(as_uuid=True), ForeignKey("datasets.id", ondelete="SET NULL"))
@@ -220,6 +279,7 @@ class AlertRule(Base):
     __tablename__ = "alert_rules"
 
     id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
     metric = Column(String, nullable=False)         # "error_rate" | "p95_latency_ms" | "avg_cost_per_request"
     comparator = Column(String, nullable=False)      # ">" | "<"
@@ -278,6 +338,15 @@ class SpanResponse(SpanCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
+# SpanUpdate — same reasoning as TraceUpdate above: the SDK creates a span up
+# front (so its own children can nest under it immediately) and fills in
+# output/timing/error once the wrapped function actually returns.
+class SpanUpdate(BaseModel):
+    output: Optional[str] = None
+    ended_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+
 # ScoreCreate = the shape of the request body sent to POST /scores.
 class ScoreCreate(BaseModel):
     trace_id: uuid.UUID
@@ -304,6 +373,18 @@ class TraceWithSpans(TraceResponse):
 class TraceFlagUpdate(BaseModel):
     flagged_for_review: bool
     review_note: Optional[str] = None
+
+
+# TraceUpdate — lets a caller finish filling in a trace it created earlier.
+# The SDK's traced() needs this: a nested traced() call needs its parent's
+# trace_id to already exist *before* it runs, so the SDK creates the Trace
+# row up front (name + input only) and fills in output/timing here once the
+# wrapped function actually returns.
+class TraceUpdate(BaseModel):
+    output: Optional[str] = None
+    ended_at: Optional[datetime] = None
+    total_tokens: Optional[int] = None
+    cost: Optional[float] = None
 
 
 # EvalCase — one test case (question + optional expected keyword). Defined
@@ -498,6 +579,25 @@ class ExperimentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ProjectCreate/ProjectResponse — creating a project is how a new customer
+# gets onboarded. ProjectCreateResponse additionally carries the raw API key,
+# shown exactly once — after this response, only its hash is ever stored.
+class ProjectCreate(BaseModel):
+    name: str
+
+
+class ProjectResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectCreateResponse(ProjectResponse):
+    api_key: str
+
+
 # 5. The FastAPI app itself.
 app = FastAPI()
 
@@ -508,6 +608,89 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# POST /projects — onboard a new customer: creates a Project and its first
+# ApiKey, returning the raw key exactly once. Intentionally unauthenticated
+# (no admin login exists yet — see the plan's explicitly-deferred list) so a
+# demo/onboarding flow can call this directly; it does not expose or modify
+# any other project's data.
+def _issue_api_key(db: Session, project_id) -> str:
+    raw_key = f"llmobs_{secrets.token_urlsafe(32)}"
+    db_key = ApiKey(
+        project_id=project_id,
+        key_hash=_hash_api_key(raw_key),
+        key_prefix=raw_key[:12],
+    )
+    db.add(db_key)
+    db.commit()
+    return raw_key
+
+
+@app.post("/projects", response_model=ProjectCreateResponse)
+def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
+    db_project = Project(name=project.name)
+    db.add(db_project)
+    db.commit()
+    db.refresh(db_project)
+
+    raw_key = _issue_api_key(db, db_project.id)
+    return ProjectCreateResponse(id=db_project.id, name=db_project.name, created_at=db_project.created_at, api_key=raw_key)
+
+
+# POST /projects/{project_id}/api-keys — issues an additional key for an
+# EXISTING project, returned raw exactly once (same as create_project).
+# Needed because GET /projects never re-exposes a key once issued: anything
+# that only learned a project's id (e.g. the frontend's project switcher,
+# looking at a project created by someone else's SDK script) has no way to
+# view that project's data without minting itself a fresh key first.
+class ApiKeyCreateResponse(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    api_key: str
+    created_at: datetime
+
+
+@app.post("/projects/{project_id}/api-keys", response_model=ApiKeyCreateResponse)
+def create_api_key(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    db_project = db.get(Project, project_id)
+    if db_project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    raw_key = _issue_api_key(db, project_id)
+    db_key = db.query(ApiKey).filter(ApiKey.key_hash == _hash_api_key(raw_key)).first()
+    return ApiKeyCreateResponse(id=db_key.id, project_id=project_id, api_key=raw_key, created_at=db_key.created_at)
+
+
+# GET /projects — lists every project (name + id only, no keys). Backs the
+# frontend's project switcher.
+@app.get("/projects", response_model=list[ProjectResponse])
+def list_projects(db: Session = Depends(get_db)):
+    return db.query(Project).order_by(Project.created_at.asc()).all()
+
+
+# The fixed id the projects/api_keys migration inserts for the "Default
+# Project" — local dev, CI, and any pre-existing data all key off it, so it's
+# excluded from delete rather than being just another project.
+_DEFAULT_PROJECT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
+# DELETE /projects/{project_id} — removes a project and everything under it
+# (traces, spans, scores, datasets, prompts, scorers, experiments, alert
+# rules, api keys) via the ON DELETE CASCADE foreign keys already in place —
+# see create_projects_and_api_keys.sql. Same unauthenticated demo-scope
+# tradeoff as the other /projects endpoints (no admin login exists yet).
+@app.delete("/projects/{project_id}")
+def delete_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    if project_id == _DEFAULT_PROJECT_ID:
+        raise HTTPException(status_code=400, detail="Cannot delete the Default Project")
+    db_project = db.get(Project, project_id)
+    if db_project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    db.delete(db_project)
+    db.commit()
+    return {"ok": True}
 
 
 # GET /providers/status — which providers have an API key configured in .env.
@@ -532,11 +715,11 @@ def models_catalog():
 
 # 6. POST /traces — creates a new trace row and returns it.
 @app.post("/traces", response_model=TraceResponse)
-def create_trace(trace: TraceCreate, db: Session = Depends(get_db)):
+def create_trace(trace: TraceCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     # Build a SQLAlchemy model instance from the incoming JSON.
     # exclude_unset=True means fields the client didn't send (like started_at)
     # are left out, so the database's own defaults (e.g. now()) apply instead.
-    db_trace = Trace(**trace.model_dump(exclude_unset=True))
+    db_trace = Trace(**trace.model_dump(exclude_unset=True), project_id=project.id)
 
     db.add(db_trace)        # stage the new row
     db.commit()             # save it to the database
@@ -550,11 +733,16 @@ def create_trace(trace: TraceCreate, db: Session = Depends(get_db)):
 # `status` isn't a DB column — it's derived here from whether any child span
 # recorded an error, using the spans.error column added earlier.
 @app.get("/traces", response_model=list[TraceResponse])
-def list_traces(db: Session = Depends(get_db)):
-    traces = db.query(Trace).order_by(Trace.started_at.desc()).all()
+def list_traces(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    traces = db.query(Trace).filter(Trace.project_id == project.id).order_by(Trace.started_at.desc()).all()
 
     error_trace_ids = {
-        row[0] for row in db.query(Span.trace_id).filter(Span.error.isnot(None)).distinct().all()
+        row[0]
+        for row in db.query(Span.trace_id)
+        .join(Trace, Trace.id == Span.trace_id)
+        .filter(Trace.project_id == project.id, Span.error.isnot(None))
+        .distinct()
+        .all()
     }
     for trace in traces:
         if trace.id in error_trace_ids:
@@ -569,10 +757,10 @@ def list_traces(db: Session = Depends(get_db)):
 
 # 8. GET /traces/{trace_id} — fetches one trace along with all of its spans.
 @app.get("/traces/{trace_id}", response_model=TraceWithSpans)
-def get_trace(trace_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_trace(trace_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_trace = db.get(Trace, trace_id)
 
-    if db_trace is None:
+    if db_trace is None or db_trace.project_id != project.id:
         raise HTTPException(status_code=404, detail="Trace not found")
 
     if any(span.error for span in db_trace.spans):
@@ -589,13 +777,34 @@ def get_trace(trace_id: uuid.UUID, db: Session = Depends(get_db)):
 # for a second look (optionally with a note), or clear the flag once resolved.
 # Backs the Review queue page; nothing here is scored/graded automatically.
 @app.patch("/traces/{trace_id}/flag", response_model=TraceResponse)
-def flag_trace(trace_id: uuid.UUID, update: TraceFlagUpdate, db: Session = Depends(get_db)):
+def flag_trace(trace_id: uuid.UUID, update: TraceFlagUpdate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_trace = db.get(Trace, trace_id)
-    if db_trace is None:
+    if db_trace is None or db_trace.project_id != project.id:
         raise HTTPException(status_code=404, detail="Trace not found")
 
     db_trace.flagged_for_review = update.flagged_for_review
     db_trace.review_note = update.review_note
+    db.commit()
+    db.refresh(db_trace)
+
+    db_trace.status = (
+        "error" if any(span.error for span in db_trace.spans) else ("pending" if db_trace.ended_at is None else "success")
+    )
+    return db_trace
+
+
+# PATCH /traces/{trace_id} — fills in the rest of a trace created earlier
+# (see TraceUpdate above). Used by the SDK's traced(): it creates the Trace
+# row the moment a traced block is entered (so nested spans have a trace_id
+# to attach to right away) and calls this once the block actually finishes.
+@app.patch("/traces/{trace_id}", response_model=TraceResponse)
+def update_trace(trace_id: uuid.UUID, update: TraceUpdate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_trace = db.get(Trace, trace_id)
+    if db_trace is None or db_trace.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    for field, value in update.model_dump(exclude_unset=True).items():
+        setattr(db_trace, field, value)
     db.commit()
     db.refresh(db_trace)
 
@@ -631,7 +840,11 @@ def _explain_error(step_name: str, input: Optional[str], error: str) -> str:
 # If the caller included an `error`, we also generate a plain-language
 # explanation and store it in `error_explanation` before returning.
 @app.post("/spans", response_model=SpanResponse)
-def create_span(span: SpanCreate, db: Session = Depends(get_db)):
+def create_span(span: SpanCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    parent_trace = db.get(Trace, span.trace_id)
+    if parent_trace is None or parent_trace.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
     if span.parent_span_id is not None:
         parent = db.get(Span, span.parent_span_id)
         if parent is None or parent.trace_id != span.trace_id:
@@ -651,11 +864,39 @@ def create_span(span: SpanCreate, db: Session = Depends(get_db)):
     return db_span
 
 
+# PATCH /spans/{span_id} — fills in the rest of a span created earlier (see
+# SpanUpdate above and PATCH /traces/{trace_id}'s docstring for why).
+@app.patch("/spans/{span_id}", response_model=SpanResponse)
+def update_span(span_id: uuid.UUID, update: SpanUpdate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_span = db.get(Span, span_id)
+    if db_span is None:
+        raise HTTPException(status_code=404, detail="Span not found")
+    parent_trace = db.get(Trace, db_span.trace_id)
+    if parent_trace is None or parent_trace.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Span not found")
+
+    for field, value in update.model_dump(exclude_unset=True).items():
+        setattr(db_span, field, value)
+    db.commit()
+    db.refresh(db_span)
+
+    if db_span.error and not db_span.error_explanation:
+        db_span.error_explanation = _explain_error(db_span.step_name, db_span.input, db_span.error)
+        db.commit()
+        db.refresh(db_span)
+
+    return db_span
+
+
 # POST /scores — creates a new score row (an LLM-judged rating for a trace,
 # e.g. "relevance": 0.9) and returns it. score_trace.py calls this after it
 # gets a score + explanation back from the judge LLM.
 @app.post("/scores", response_model=ScoreResponse)
-def create_score(score: ScoreCreate, db: Session = Depends(get_db)):
+def create_score(score: ScoreCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    parent_trace = db.get(Trace, score.trace_id)
+    if parent_trace is None or parent_trace.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
     db_score = Score(**score.model_dump(exclude_unset=True))
 
     db.add(db_score)
@@ -668,8 +909,8 @@ def create_score(score: ScoreCreate, db: Session = Depends(get_db)):
 # Datasets — named, reusable sets of eval test cases (see the Dataset model
 # and DatasetCreate/DatasetListItem/DatasetResponse schemas above).
 @app.get("/datasets", response_model=list[DatasetListItem])
-def list_datasets(db: Session = Depends(get_db)):
-    datasets = db.query(Dataset).order_by(Dataset.updated_at.desc()).all()
+def list_datasets(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    datasets = db.query(Dataset).filter(Dataset.project_id == project.id).order_by(Dataset.updated_at.desc()).all()
     return [
         DatasetListItem(
             id=d.id,
@@ -684,8 +925,9 @@ def list_datasets(db: Session = Depends(get_db)):
 
 
 @app.post("/datasets", response_model=DatasetResponse)
-def create_dataset(dataset: DatasetCreate, db: Session = Depends(get_db)):
+def create_dataset(dataset: DatasetCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_dataset = Dataset(
+        project_id=project.id,
         name=dataset.name,
         description=dataset.description,
         cases=[c.model_dump() for c in dataset.cases],
@@ -697,17 +939,17 @@ def create_dataset(dataset: DatasetCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/datasets/{dataset_id}", response_model=DatasetResponse)
-def get_dataset(dataset_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_dataset(dataset_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_dataset = db.get(Dataset, dataset_id)
-    if db_dataset is None:
+    if db_dataset is None or db_dataset.project_id != project.id:
         raise HTTPException(status_code=404, detail="Dataset not found")
     return db_dataset
 
 
 @app.put("/datasets/{dataset_id}", response_model=DatasetResponse)
-def update_dataset(dataset_id: uuid.UUID, dataset: DatasetCreate, db: Session = Depends(get_db)):
+def update_dataset(dataset_id: uuid.UUID, dataset: DatasetCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_dataset = db.get(Dataset, dataset_id)
-    if db_dataset is None:
+    if db_dataset is None or db_dataset.project_id != project.id:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     db_dataset.name = dataset.name
@@ -719,9 +961,9 @@ def update_dataset(dataset_id: uuid.UUID, dataset: DatasetCreate, db: Session = 
 
 
 @app.delete("/datasets/{dataset_id}")
-def delete_dataset(dataset_id: uuid.UUID, db: Session = Depends(get_db)):
+def delete_dataset(dataset_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_dataset = db.get(Dataset, dataset_id)
-    if db_dataset is None:
+    if db_dataset is None or db_dataset.project_id != project.id:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     db.delete(db_dataset)
@@ -732,13 +974,13 @@ def delete_dataset(dataset_id: uuid.UUID, db: Session = Depends(get_db)):
 # Prompts — saved, reusable system-prompt templates for the Playground page
 # (see the Prompt model and PromptCreate/PromptResponse schemas above).
 @app.get("/prompts", response_model=list[PromptResponse])
-def list_prompts(db: Session = Depends(get_db)):
-    return db.query(Prompt).order_by(Prompt.updated_at.desc()).all()
+def list_prompts(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    return db.query(Prompt).filter(Prompt.project_id == project.id).order_by(Prompt.updated_at.desc()).all()
 
 
 @app.post("/prompts", response_model=PromptResponse)
-def create_prompt(prompt: PromptCreate, db: Session = Depends(get_db)):
-    db_prompt = Prompt(**prompt.model_dump())
+def create_prompt(prompt: PromptCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_prompt = Prompt(project_id=project.id, **prompt.model_dump())
     db.add(db_prompt)
     db.commit()
     db.refresh(db_prompt)
@@ -756,17 +998,17 @@ def create_prompt(prompt: PromptCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/prompts/{prompt_id}", response_model=PromptResponse)
-def get_prompt(prompt_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_prompt(prompt_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_prompt = db.get(Prompt, prompt_id)
-    if db_prompt is None:
+    if db_prompt is None or db_prompt.project_id != project.id:
         raise HTTPException(status_code=404, detail="Prompt not found")
     return db_prompt
 
 
 @app.put("/prompts/{prompt_id}", response_model=PromptResponse)
-def update_prompt(prompt_id: uuid.UUID, prompt: PromptCreate, db: Session = Depends(get_db)):
+def update_prompt(prompt_id: uuid.UUID, prompt: PromptCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_prompt = db.get(Prompt, prompt_id)
-    if db_prompt is None:
+    if db_prompt is None or db_prompt.project_id != project.id:
         raise HTTPException(status_code=404, detail="Prompt not found")
 
     db_prompt.name = prompt.name
@@ -795,8 +1037,9 @@ def update_prompt(prompt_id: uuid.UUID, prompt: PromptCreate, db: Session = Depe
 # earlier version into the editable draft (restoring doesn't auto-save —
 # it's still a normal edit the user has to Save, same as any other change).
 @app.get("/prompts/{prompt_id}/versions", response_model=list[PromptVersionResponse])
-def list_prompt_versions(prompt_id: uuid.UUID, db: Session = Depends(get_db)):
-    if db.get(Prompt, prompt_id) is None:
+def list_prompt_versions(prompt_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_prompt = db.get(Prompt, prompt_id)
+    if db_prompt is None or db_prompt.project_id != project.id:
         raise HTTPException(status_code=404, detail="Prompt not found")
     return (
         db.query(PromptVersion)
@@ -807,9 +1050,9 @@ def list_prompt_versions(prompt_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @app.delete("/prompts/{prompt_id}")
-def delete_prompt(prompt_id: uuid.UUID, db: Session = Depends(get_db)):
+def delete_prompt(prompt_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_prompt = db.get(Prompt, prompt_id)
-    if db_prompt is None:
+    if db_prompt is None or db_prompt.project_id != project.id:
         raise HTTPException(status_code=404, detail="Prompt not found")
 
     db.delete(db_prompt)
@@ -821,9 +1064,9 @@ def delete_prompt(prompt_id: uuid.UUID, db: Session = Depends(get_db)):
 # loaded into Playground. An atomic UPDATE (not read-modify-write) — same
 # cost either way, removes a lost-update mode from a fast double-click.
 @app.post("/prompts/{prompt_id}/use", response_model=PromptResponse)
-def use_prompt(prompt_id: uuid.UUID, db: Session = Depends(get_db)):
+def use_prompt(prompt_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_prompt = db.get(Prompt, prompt_id)
-    if db_prompt is None:
+    if db_prompt is None or db_prompt.project_id != project.id:
         raise HTTPException(status_code=404, detail="Prompt not found")
 
     db.query(Prompt).filter(Prompt.id == prompt_id).update({Prompt.usage_count: Prompt.usage_count + 1})
@@ -834,8 +1077,9 @@ def use_prompt(prompt_id: uuid.UUID, db: Session = Depends(get_db)):
 
 # 10. Shared helper: build + save a Trace row, used by the Playground and
 # Evaluation endpoints below so a run always shows up in Overview/Traces.
-def _log_trace(db: Session, *, name: str, input: str, output: str, started_at, ended_at, total_tokens: int, cost: float, model: Optional[str] = None) -> Trace:
+def _log_trace(db: Session, *, project_id, name: str, input: str, output: str, started_at, ended_at, total_tokens: int, cost: float, model: Optional[str] = None) -> Trace:
     db_trace = Trace(
+        project_id=project_id,
         name=name,
         input=input,
         output=output,
@@ -905,7 +1149,7 @@ class PlaygroundResponse(BaseModel):
 
 
 @app.post("/playground/run", response_model=PlaygroundResponse)
-def run_playground(req: PlaygroundRequest, db: Session = Depends(get_db)):
+def run_playground(req: PlaygroundRequest, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     call_provider = PROVIDERS[req.provider]
 
     # Never pass an arbitrary client-supplied string straight into a real
@@ -936,6 +1180,7 @@ def run_playground(req: PlaygroundRequest, db: Session = Depends(get_db)):
 
     db_trace = _log_trace(
         db,
+        project_id=project.id,
         name=f"playground: {req.provider}",
         input=last_user_message,
         output=answer,
@@ -1087,7 +1332,7 @@ def _timed_call(fn, *args):
 # score, any selected custom Scorers, trace + nested span log. Shared by both
 # the batch endpoint below and the single-pair endpoint the frontend uses for
 # live per-case progress.
-def _run_eval_case(case: EvalCase, provider: str, db: Session, scorers: Optional[list["Scorer"]] = None) -> EvalCaseResult:
+def _run_eval_case(case: EvalCase, provider: str, db: Session, project_id, scorers: Optional[list["Scorer"]] = None) -> EvalCaseResult:
     scorers = scorers or []
     call_provider = PROVIDERS[provider]
     # Evaluation has no model picker in the UI (it already runs multiple
@@ -1140,6 +1385,7 @@ def _run_eval_case(case: EvalCase, provider: str, db: Session, scorers: Optional
 
     db_trace = _log_trace(
         db,
+        project_id=project_id,
         name=f"eval: {provider}",
         input=case.question,
         output=answer,
@@ -1219,22 +1465,23 @@ class EvalSingleRequest(BaseModel):
     scorer_slugs: list[str] = []
 
 
-def _lookup_scorers(db: Session, slugs: list[str]) -> list[Scorer]:
+def _lookup_scorers(db: Session, project_id, slugs: list[str]) -> list[Scorer]:
     if not slugs:
         return []
-    return db.query(Scorer).filter(Scorer.slug.in_(slugs)).all()
+    return db.query(Scorer).filter(Scorer.project_id == project_id, Scorer.slug.in_(slugs)).all()
 
 
 @app.post("/evaluation/run_one", response_model=EvalCaseResult)
-def run_evaluation_one(req: EvalSingleRequest, db: Session = Depends(get_db)):
+def run_evaluation_one(req: EvalSingleRequest, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     case = EvalCase(question=req.question, expected=req.expected)
-    return _run_eval_case(case, req.provider, db, scorers=_lookup_scorers(db, req.scorer_slugs))
+    scorers = _lookup_scorers(db, project.id, req.scorer_slugs)
+    return _run_eval_case(case, req.provider, db, project.id, scorers=scorers)
 
 
 @app.post("/evaluation/run", response_model=EvalResponse)
-def run_evaluation(req: EvalRequest, db: Session = Depends(get_db)):
-    scorers = _lookup_scorers(db, req.scorer_slugs)
-    results = [_run_eval_case(case, provider, db, scorers=scorers) for case in req.cases for provider in req.providers]
+def run_evaluation(req: EvalRequest, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    scorers = _lookup_scorers(db, project.id, req.scorer_slugs)
+    results = [_run_eval_case(case, provider, db, project.id, scorers=scorers) for case in req.cases for provider in req.providers]
     return EvalResponse(results=results)
 
 
@@ -1249,20 +1496,20 @@ def _slugify(name: str) -> str:
 
 
 @app.get("/scorers", response_model=list[ScorerResponse])
-def list_scorers(db: Session = Depends(get_db)):
-    return db.query(Scorer).order_by(Scorer.updated_at.desc()).all()
+def list_scorers(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    return db.query(Scorer).filter(Scorer.project_id == project.id).order_by(Scorer.updated_at.desc()).all()
 
 
 @app.post("/scorers", response_model=ScorerResponse)
-def create_scorer(scorer: ScorerCreate, db: Session = Depends(get_db)):
+def create_scorer(scorer: ScorerCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     base_slug = _slugify(scorer.name)
     slug = base_slug
     suffix = 2
-    while db.query(Scorer).filter(Scorer.slug == slug).first() is not None:
+    while db.query(Scorer).filter(Scorer.project_id == project.id, Scorer.slug == slug).first() is not None:
         slug = f"{base_slug}-{suffix}"
         suffix += 1
 
-    db_scorer = Scorer(slug=slug, **scorer.model_dump())
+    db_scorer = Scorer(project_id=project.id, slug=slug, **scorer.model_dump())
     db.add(db_scorer)
     try:
         db.commit()
@@ -1277,17 +1524,17 @@ def create_scorer(scorer: ScorerCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/scorers/{scorer_id}", response_model=ScorerResponse)
-def get_scorer(scorer_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_scorer(scorer_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_scorer = db.get(Scorer, scorer_id)
-    if db_scorer is None:
+    if db_scorer is None or db_scorer.project_id != project.id:
         raise HTTPException(status_code=404, detail="Scorer not found")
     return db_scorer
 
 
 @app.put("/scorers/{scorer_id}", response_model=ScorerResponse)
-def update_scorer(scorer_id: uuid.UUID, scorer: ScorerCreate, db: Session = Depends(get_db)):
+def update_scorer(scorer_id: uuid.UUID, scorer: ScorerCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_scorer = db.get(Scorer, scorer_id)
-    if db_scorer is None:
+    if db_scorer is None or db_scorer.project_id != project.id:
         raise HTTPException(status_code=404, detail="Scorer not found")
 
     db_scorer.name = scorer.name
@@ -1301,9 +1548,9 @@ def update_scorer(scorer_id: uuid.UUID, scorer: ScorerCreate, db: Session = Depe
 
 
 @app.delete("/scorers/{scorer_id}")
-def delete_scorer(scorer_id: uuid.UUID, db: Session = Depends(get_db)):
+def delete_scorer(scorer_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_scorer = db.get(Scorer, scorer_id)
-    if db_scorer is None:
+    if db_scorer is None or db_scorer.project_id != project.id:
         raise HTTPException(status_code=404, detail="Scorer not found")
 
     db.delete(db_scorer)
@@ -1324,8 +1571,8 @@ def _experiment_pass_rate(results: list[ExperimentResult]) -> Optional[float]:
 
 
 @app.get("/experiments", response_model=list[ExperimentListItem])
-def list_experiments(db: Session = Depends(get_db)):
-    experiments = db.query(Experiment).order_by(Experiment.created_at.desc()).all()
+def list_experiments(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    experiments = db.query(Experiment).filter(Experiment.project_id == project.id).order_by(Experiment.created_at.desc()).all()
     return [
         ExperimentListItem(
             id=e.id,
@@ -1343,8 +1590,14 @@ def list_experiments(db: Session = Depends(get_db)):
 
 
 @app.post("/experiments", response_model=ExperimentResponse)
-def create_experiment(experiment: ExperimentCreate, db: Session = Depends(get_db)):
+def create_experiment(experiment: ExperimentCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    if experiment.dataset_id is not None:
+        dataset = db.get(Dataset, experiment.dataset_id)
+        if dataset is None or dataset.project_id != project.id:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+
     db_experiment = Experiment(
+        project_id=project.id,
         name=experiment.name,
         description=experiment.description,
         dataset_id=experiment.dataset_id,
@@ -1364,17 +1617,17 @@ def create_experiment(experiment: ExperimentCreate, db: Session = Depends(get_db
 
 
 @app.get("/experiments/{experiment_id}", response_model=ExperimentResponse)
-def get_experiment(experiment_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_experiment(experiment_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_experiment = db.get(Experiment, experiment_id)
-    if db_experiment is None:
+    if db_experiment is None or db_experiment.project_id != project.id:
         raise HTTPException(status_code=404, detail="Experiment not found")
     return db_experiment
 
 
 @app.delete("/experiments/{experiment_id}")
-def delete_experiment(experiment_id: uuid.UUID, db: Session = Depends(get_db)):
+def delete_experiment(experiment_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_experiment = db.get(Experiment, experiment_id)
-    if db_experiment is None:
+    if db_experiment is None or db_experiment.project_id != project.id:
         raise HTTPException(status_code=404, detail="Experiment not found")
 
     db.delete(db_experiment)
@@ -1387,13 +1640,13 @@ def delete_experiment(experiment_id: uuid.UUID, db: Session = Depends(get_db)):
 # integration in this app, so "triggered" surfaces only in the Alerts page —
 # it's a real, computed signal, just not a pushed notification.
 @app.get("/alert-rules", response_model=list[AlertRuleResponse])
-def list_alert_rules(db: Session = Depends(get_db)):
-    return db.query(AlertRule).order_by(AlertRule.created_at.desc()).all()
+def list_alert_rules(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    return db.query(AlertRule).filter(AlertRule.project_id == project.id).order_by(AlertRule.created_at.desc()).all()
 
 
 @app.post("/alert-rules", response_model=AlertRuleResponse)
-def create_alert_rule(rule: AlertRuleCreate, db: Session = Depends(get_db)):
-    db_rule = AlertRule(**rule.model_dump())
+def create_alert_rule(rule: AlertRuleCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_rule = AlertRule(project_id=project.id, **rule.model_dump())
     db.add(db_rule)
     db.commit()
     db.refresh(db_rule)
@@ -1401,9 +1654,9 @@ def create_alert_rule(rule: AlertRuleCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/alert-rules/{rule_id}", response_model=AlertRuleResponse)
-def update_alert_rule(rule_id: uuid.UUID, rule: AlertRuleCreate, db: Session = Depends(get_db)):
+def update_alert_rule(rule_id: uuid.UUID, rule: AlertRuleCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_rule = db.get(AlertRule, rule_id)
-    if db_rule is None:
+    if db_rule is None or db_rule.project_id != project.id:
         raise HTTPException(status_code=404, detail="Alert rule not found")
 
     for field, value in rule.model_dump().items():
@@ -1414,9 +1667,9 @@ def update_alert_rule(rule_id: uuid.UUID, rule: AlertRuleCreate, db: Session = D
 
 
 @app.delete("/alert-rules/{rule_id}")
-def delete_alert_rule(rule_id: uuid.UUID, db: Session = Depends(get_db)):
+def delete_alert_rule(rule_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_rule = db.get(AlertRule, rule_id)
-    if db_rule is None:
+    if db_rule is None or db_rule.project_id != project.id:
         raise HTTPException(status_code=404, detail="Alert rule not found")
 
     db.delete(db_rule)
@@ -1426,7 +1679,7 @@ def delete_alert_rule(rule_id: uuid.UUID, db: Session = Depends(get_db)):
 
 def _evaluate_alert_rule(rule: AlertRule, db: Session) -> AlertStatus:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=rule.window_minutes)
-    traces = db.query(Trace).filter(Trace.started_at >= cutoff).all()
+    traces = db.query(Trace).filter(Trace.project_id == rule.project_id, Trace.started_at >= cutoff).all()
 
     current_value = None
     if rule.metric == "error_rate":
@@ -1467,8 +1720,8 @@ def _evaluate_alert_rule(rule: AlertRule, db: Session) -> AlertStatus:
 # trace data right now. Recomputed on every call, nothing cached/scheduled —
 # there's no background job runner in this app (see main.py's docstring).
 @app.get("/alerts/status", response_model=list[AlertStatus])
-def alerts_status(db: Session = Depends(get_db)):
-    rules = db.query(AlertRule).filter(AlertRule.enabled.is_(True)).all()
+def alerts_status(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    rules = db.query(AlertRule).filter(AlertRule.project_id == project.id, AlertRule.enabled.is_(True)).all()
     return [_evaluate_alert_rule(rule, db) for rule in rules]
 
 
@@ -1486,9 +1739,9 @@ class AnalyzeExperimentResponse(BaseModel):
 
 
 @app.post("/experiments/{experiment_id}/analyze", response_model=AnalyzeExperimentResponse)
-def analyze_experiment(experiment_id: uuid.UUID, req: AnalyzeExperimentRequest, db: Session = Depends(get_db)):
+def analyze_experiment(experiment_id: uuid.UUID, req: AnalyzeExperimentRequest, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_experiment = db.get(Experiment, experiment_id)
-    if db_experiment is None:
+    if db_experiment is None or db_experiment.project_id != project.id:
         raise HTTPException(status_code=404, detail="Experiment not found")
 
     results = db_experiment.results

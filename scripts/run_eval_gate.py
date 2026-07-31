@@ -40,12 +40,16 @@ SUMMARY_PATH = ROOT / "eval_summary.md"
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8010")
 PROVIDERS = [p.strip() for p in os.environ.get("EVAL_PROVIDERS", "groq").split(",") if p.strip()]
 FAIL_ON_REGRESSION = os.environ.get("FAIL_ON_REGRESSION", "false").lower() == "true"
+# The fixed "Default Project" dev key the projects/api_keys migration bakes
+# in — every endpoint this script calls is now tenant-scoped and requires it.
+API_KEY = os.environ.get("EVAL_API_KEY", "llmobs_dev_default_do_not_use_in_prod")
 
 
 def run_case(case: dict, provider: str) -> dict:
     resp = requests.post(
         f"{BACKEND_URL}/evaluation/run_one",
         json={"provider": provider, "question": case["question"], "expected": case.get("expected")},
+        headers={"X-API-Key": API_KEY},
         timeout=60,
     )
     resp.raise_for_status()

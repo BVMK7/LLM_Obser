@@ -49,6 +49,10 @@ jobs:
       # an opt-in change to this env var, not the default.
       EVAL_PROVIDERS: groq
       FAIL_ON_REGRESSION: "false"
+      # Fixed dev key the projects/api_keys migration bakes in for the
+      # "Default Project" — not a secret, just a bootstrap credential valid
+      # only against this run's throwaway Postgres container.
+      EVAL_API_KEY: llmobs_dev_default_do_not_use_in_prod
 
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +69,7 @@ jobs:
           for f in create_traces.sql create_spans.sql create_scores.sql create_prompts.sql \
                    create_datasets.sql add_model_to_traces.sql create_scorers.sql \
                    create_experiments.sql create_prompt_versions.sql create_alert_rules.sql \
-                   add_review_and_span_hierarchy.sql; do
+                   add_review_and_span_hierarchy.sql create_projects_and_api_keys.sql; do
             PGPASSWORD=llm_observability psql -h localhost -p 5433 -U llm_observability -d llm_observability -f "$f"
           done
 
