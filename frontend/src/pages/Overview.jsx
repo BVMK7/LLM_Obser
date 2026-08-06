@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { getTraces } from "../api";
+import { getTraces, API_BASE } from "../api";
 import MetricCard from "../components/MetricCard";
 import RequestChart from "../components/RequestChart";
 import ProviderHeatmap from "../components/ProviderHeatmap";
@@ -85,7 +85,7 @@ export default function Overview() {
   if (error) {
     return (
       <div className="text-red-400">
-        Couldn't reach the API — is it running at http://localhost:8010? ({error})
+        Couldn't reach the API at {API_BASE} — is it running/reachable, and is your API key valid? ({error})
       </div>
     );
   }

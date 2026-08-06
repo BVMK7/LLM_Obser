@@ -129,3 +129,32 @@ export function downloadFile(filename, content, mimeType) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// Shared by Experiments.jsx (Model Comparison cards) and ExperimentDetail.jsx
+// (Per-Provider Summary table) — every distinct score key actually present
+// across a set of experiment results, e.g. "faithfulness", "relevance", plus
+// whatever custom Scorer names were selected for that run. Not a fixed set —
+// the backend's `scores` column is a free-form name→float map (see
+// ExperimentResult in main.py), so this reads whatever keys really exist.
+export function scoreKeys(results) {
+  const keys = new Set();
+  for (const r of results) for (const k of Object.keys(r.scores || {})) keys.add(k);
+  return Array.from(keys);
+}
+
+export function aggregateByProvider(results) {
+  const groups = {};
+  for (const r of results) (groups[r.provider] ||= []).push(r);
+  return Object.entries(groups).map(([provider, rows]) => {
+    const graded = rows.filter((r) => r.passed != null);
+    const passRate = graded.length ? graded.filter((r) => r.passed).length / graded.length : null;
+    const avgScores = {};
+    for (const key of scoreKeys(rows)) {
+      const vals = rows.map((r) => r.scores?.[key]).filter((v) => v != null);
+      avgScores[key] = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+    }
+    const avgLatency = rows.reduce((s, r) => s + r.latency_ms, 0) / rows.length;
+    const totalCost = rows.reduce((s, r) => s + Number(r.cost || 0), 0);
+    return { provider, count: rows.length, passRate, avgScores, avgLatency, totalCost };
+  });
+}

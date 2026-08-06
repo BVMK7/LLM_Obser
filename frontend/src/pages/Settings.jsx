@@ -1,9 +1,7 @@
 import { useEffect, useState } from "react";
 import { getProviderStatus } from "../api";
-import { useTheme } from "../theme";
 
 export default function Settings() {
-  const [theme, toggleTheme] = useTheme();
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
 
@@ -17,32 +15,6 @@ export default function Settings() {
     <div>
       <h1 className="text-2xl font-semibold text-[var(--text-primary)] mb-1">Settings</h1>
       <p className="text-sm text-[var(--text-muted)] mb-6">App preferences and provider configuration.</p>
-
-      <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl p-4 mb-6 max-w-md">
-        <div className="text-sm font-medium text-[var(--text-primary)] mb-3">Appearance</div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => theme !== "dark" && toggleTheme()}
-            className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${
-              theme === "dark"
-                ? "bg-[var(--brand-primary)] text-white"
-                : "bg-white/5 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-            }`}
-          >
-            Dark
-          </button>
-          <button
-            onClick={() => theme !== "light" && toggleTheme()}
-            className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${
-              theme === "light"
-                ? "bg-[var(--brand-primary)] text-white"
-                : "bg-white/5 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-            }`}
-          >
-            Light
-          </button>
-        </div>
-      </div>
 
       <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl p-4 max-w-md">
         <div className="text-sm font-medium text-[var(--text-primary)] mb-1">Providers</div>

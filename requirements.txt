@@ -4,6 +4,7 @@ sqlalchemy
 psycopg2-binary
 python-dotenv
 pydantic
+bcrypt
 groq
 google-genai
 openai

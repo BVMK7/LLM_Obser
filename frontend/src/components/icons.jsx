@@ -93,16 +93,6 @@ export function DatasetsIcon(props) {
   );
 }
 
-export function ModelsIcon(props) {
-  return (
-    <IconBase {...props}>
-      <path d="M12 2 3 7v10l9 5 9-5V7z" />
-      <path d="M3 7l9 5 9-5" />
-      <path d="M12 12v10" />
-    </IconBase>
-  );
-}
-
 export function PromptsIcon(props) {
   return (
     <IconBase {...props}>
@@ -164,6 +154,41 @@ export function DocumentationIcon(props) {
       <polyline points="14 2 14 8 20 8" />
       <line x1="8" y1="13" x2="16" y2="13" />
       <line x1="8" y1="17" x2="16" y2="17" />
+    </IconBase>
+  );
+}
+
+// The brand mark shown in the Topbar's badge, in place of a plain "O" —
+// a bold rounded desk-lamp silhouette (swivel-arm lamp, angled shade,
+// pill-shaped foot), matching the thick-stroke reference icon supplied.
+export function LampIcon({ className = "w-[18px] h-[18px]" }) {
+  return (
+    <svg
+      viewBox="0 0 100 100"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="6.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M46 18 54 26 46 34 38 26Z" />
+      <path d="M50 21 88 34Q94 36 90 41L57 53Z" />
+      <path d="M40 27Q19 30 19 44L19 66" />
+      <rect x="7" y="66" width="24" height="16" rx="8" />
+    </svg>
+  );
+}
+
+// Stand-in for a provider we can't identify (e.g. "unknown" from
+// manually-inserted trace rows) — shown next to that row instead of a
+// real provider logo.
+export function UnknownProviderIcon(props) {
+  return (
+    <IconBase {...props}>
+      <path d="M5 20V11a7 7 0 0 1 14 0v9l-3.5-2-3.5 2-3.5-2L5 20Z" />
+      <circle cx="9.5" cy="12.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14.5" cy="12.5" r="1" fill="currentColor" stroke="none" />
     </IconBase>
   );
 }

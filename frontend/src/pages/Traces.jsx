@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { getTraces, getTrace } from "../api";
+import { getTraces, getTrace, API_BASE } from "../api";
 import StatusPill from "../components/StatusPill";
 import MetricCard from "../components/MetricCard";
 import Skeleton from "../components/Skeleton";
 import CopyButton from "../components/CopyButton";
+import SpanTimeline from "../components/SpanTimeline";
 import {
   formatCost,
   formatDuration,
@@ -44,14 +45,33 @@ export default function Traces() {
   const [selectedTrace, setSelectedTrace] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  // Provider/Status filters live in the Sidebar (see components/Sidebar.jsx)
-  // and are shared with this page via URL search params.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const providerFilter = searchParams.get("provider") || "all";
   const statusFilter = useMemo(
     () => new Set((searchParams.get("status") || "").split(",").filter(Boolean)),
     [searchParams]
   );
+  const providerOptions = useMemo(
+    () => Array.from(new Set(traces.map((t) => extractProvider(t.name)))).sort(),
+    [traces]
+  );
+
+  const setProviderFilter = (value) => {
+    const next = new URLSearchParams(searchParams);
+    if (value === "all") next.delete("provider");
+    else next.set("provider", value);
+    setSearchParams(next);
+  };
+
+  const toggleStatusFilter = (status) => {
+    const current = new Set(statusFilter);
+    if (current.has(status)) current.delete(status);
+    else current.add(status);
+    const next = new URLSearchParams(searchParams);
+    if (current.size === 0) next.delete("status");
+    else next.set("status", Array.from(current).join(","));
+    setSearchParams(next);
+  };
   // Free-text search lives in the Topbar (see components/Topbar.jsx) and is
   // shared here via the same URL-search-param pattern as the provider/status filters.
   const searchQuery = (searchParams.get("q") || "").trim().toLowerCase();
@@ -136,7 +156,7 @@ export default function Traces() {
   if (error) {
     return (
       <div className="text-red-400">
-        Couldn't reach the API — is it running at http://localhost:8010? ({error})
+        Couldn't reach the API at {API_BASE} — is it running/reachable, and is your API key valid? ({error})
       </div>
     );
   }
@@ -146,12 +166,6 @@ export default function Traces() {
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-2xl font-semibold text-[var(--text-primary)]">Trace Explorer</h1>
         <div className="flex items-center gap-2">
-          <span
-            title="Filters live in the sidebar"
-            className="w-8 h-8 flex items-center justify-center rounded-lg border border-[var(--border-subtle)] text-[var(--text-secondary)] cursor-default"
-          >
-            ⚲
-          </span>
           <button
             onClick={handleExportCSV}
             title="Export filtered traces as CSV"
@@ -162,10 +176,46 @@ export default function Traces() {
           </button>
         </div>
       </div>
-      <p className="text-sm text-[var(--text-muted)] mb-6">
-        Real-time deep-dive into LLM traces, span waterfalls, and token-level economics. Use the Filters panel
-        in the sidebar to narrow by model or status.
+      <p className="text-sm text-[var(--text-muted)] mb-4">
+        Real-time deep-dive into LLM traces, span waterfalls, and token-level economics.
       </p>
+
+      <div className="flex flex-wrap items-center gap-4 mb-4 bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl p-3">
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-[var(--text-muted)]">Provider</label>
+          <select
+            value={providerFilter}
+            onChange={(e) => setProviderFilter(e.target.value)}
+            className="bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-2 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+          >
+            <option value="all">All Providers</option>
+            {providerOptions.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-[var(--text-muted)]">Status</label>
+          <div className="flex gap-2">
+            {["success", "error"].map((status) => (
+              <button
+                key={status}
+                onClick={() => toggleStatusFilter(status)}
+                className={`text-xs px-2.5 py-1 rounded-lg border capitalize transition-colors ${
+                  statusFilter.has(status)
+                    ? "border-[var(--brand-primary)] text-[var(--brand-primary)] bg-[color-mix(in_srgb,var(--brand-primary)_8%,transparent)]"
+                    : "border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                {status}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
 
       <div className="flex gap-4 mb-6" style={{ minHeight: 420 }}>
         {/* Left: list of traces */}
@@ -306,6 +356,12 @@ export default function Traces() {
               <div className="text-sm font-medium text-[var(--text-primary)] mb-2">
                 Spans ({selectedTrace.spans.length})
               </div>
+              {selectedTrace.spans.length > 0 && (
+                <div className="bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg p-3 mb-3">
+                  <div className="text-xs uppercase text-[var(--text-muted)] mb-2">Span Timeline</div>
+                  <SpanTimeline trace={selectedTrace} />
+                </div>
+              )}
               <div className="flex flex-col gap-2">
                 {selectedTrace.spans.map((span) => (
                   <div key={span.id} className="bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg p-3">

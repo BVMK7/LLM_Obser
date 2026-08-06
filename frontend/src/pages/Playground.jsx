@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { getProviderStatus, runPlayground, getModelCatalog, getPrompts, createPrompt, usePrompt, createScore } from "../api";
+import { getProviderStatus, runPlayground, getModelCatalog, getPrompts, createPrompt, usePrompt, createScore, API_BASE } from "../api";
 import Slider from "../components/Slider";
 import CopyButton from "../components/CopyButton";
 import { formatCost, formatTokens } from "../utils";
@@ -313,7 +313,7 @@ export default function Playground() {
           {loading && <div className="text-sm text-[var(--text-muted)]">Waiting for {provider}…</div>}
           {error && (
             <div className="text-sm text-red-400">
-              Couldn't reach the API — is it running at http://localhost:8010? ({error})
+              Couldn't reach the API at {API_BASE} — is it running/reachable, and is your API key valid? ({error})
             </div>
           )}
         </div>

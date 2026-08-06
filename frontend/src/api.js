@@ -1,18 +1,18 @@
 // Thin wrapper around the FastAPI backend. Reads VITE_API_BASE (set in
 // frontend/.env, see .env.example) so the same dashboard can point at either
 // the local backend or a deployed one without a code change.
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8010";
+export const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8010";
 
-// Every tenant-owned endpoint now requires an X-API-Key header. This ships
-// with the same fixed dev key the projects/api_keys migration bakes in for
-// the pre-existing "Default Project" (see create_projects_and_api_keys.sql)
-// so the existing local dev flow keeps working with zero setup; switching
-// the dropdown in Topbar to a different project just overwrites this.
-const DEFAULT_API_KEY = "llmobs_dev_default_do_not_use_in_prod";
+// Every tenant-owned endpoint requires an X-API-Key header. No hardcoded
+// fallback key here on purpose — ProjectSwitcher.jsx is responsible for
+// setting a real key for a real project the logged-in user belongs to
+// (minting one via POST /projects/{id}/api-keys if none is on file yet).
+// If nothing's set, requests correctly 401 instead of silently reading
+// whichever project a hardcoded key happened to belong to.
 const STORAGE_KEY = "llmobs_active_api_key";
 
 export function getApiKey() {
-  return localStorage.getItem(STORAGE_KEY) || DEFAULT_API_KEY;
+  return localStorage.getItem(STORAGE_KEY) || "";
 }
 
 export function setApiKey(key) {
@@ -21,6 +21,26 @@ export function setApiKey(key) {
 
 function authHeaders() {
   return { "X-API-Key": getApiKey() };
+}
+
+// A second, separate credential — the logged-in user's session, used only
+// for project MANAGEMENT calls (projects/members/invites/api-keys/billing).
+// Never merged with the X-API-Key above: that one authenticates the SDK's
+// data plane and must keep working with no login at all.
+const USER_TOKEN_KEY = "llmobs_user_session_token";
+
+export function getUserToken() {
+  return localStorage.getItem(USER_TOKEN_KEY) || "";
+}
+
+export function setUserToken(token) {
+  if (token) localStorage.setItem(USER_TOKEN_KEY, token);
+  else localStorage.removeItem(USER_TOKEN_KEY);
+}
+
+function userAuthHeaders() {
+  const token = getUserToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 export async function getTraces() {
@@ -167,14 +187,17 @@ export async function getPromptVersions(id) {
 
 // Shared helper for the newer endpoints below — same fetch-wrapper idiom as
 // every function above, just without repeating the method/headers/error text
-// four times per resource.
-async function request(path, { method = "GET", body, errorMessage } = {}) {
+// four times per resource. `auth: "user"` swaps in the Bearer session header
+// instead of X-API-Key, for the project-management endpoints.
+async function request(path, { method = "GET", body, errorMessage, auth = "apiKey" } = {}) {
+  const authHeadersFn = auth === "user" ? userAuthHeaders : authHeaders;
   const res = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: body !== undefined ? { "Content-Type": "application/json", ...authHeaders() } : authHeaders(),
+    headers: body !== undefined ? { "Content-Type": "application/json", ...authHeadersFn() } : authHeadersFn(),
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) throw new Error(errorMessage || `Request to ${path} failed`);
+  if (res.status === 204) return null;
   return res.json();
 }
 
@@ -205,12 +228,37 @@ export const updateAlertRule = (id, payload) => request(`/alert-rules/${id}`, { 
 export const deleteAlertRule = (id) => request(`/alert-rules/${id}`, { method: "DELETE", errorMessage: "Failed to delete alert rule" });
 export const getAlertsStatus = () => request("/alerts/status", { errorMessage: "Failed to load alert status" });
 
-// Projects — multi-tenancy. These two endpoints are intentionally
-// unauthenticated (no admin login exists yet) so onboarding a new customer
-// (or, in the frontend, switching the project-switcher dropdown) doesn't
-// need a key first.
-export const getProjects = () => request("/projects", { errorMessage: "Failed to load projects" });
-export const createProject = (payload) => request("/projects", { method: "POST", body: payload, errorMessage: "Failed to create project" });
+// Auth — real user accounts. Separate credential from the X-API-Key data
+// plane above (see userAuthHeaders); gates project management only.
+export const signup = (payload) => request("/auth/signup", { method: "POST", body: payload, errorMessage: "Signup failed" });
+export const login = (payload) => request("/auth/login", { method: "POST", body: payload, errorMessage: "Invalid email or password" });
+export const getMe = () => request("/auth/me", { auth: "user", errorMessage: "Not logged in" });
+export const logout = () => request("/auth/logout", { method: "POST", auth: "user", errorMessage: "Logout failed" });
+
+// Projects — multi-tenancy. Listing/creating/deleting a project, and
+// everything under project management, requires the logged-in user's
+// session and is scoped to projects they're a member of.
+export const getProjects = () => request("/projects", { auth: "user", errorMessage: "Failed to load projects" });
+export const createProject = (payload) => request("/projects", { method: "POST", body: payload, auth: "user", errorMessage: "Failed to create project" });
+export const renameProject = (id, name) => request(`/projects/${id}`, { method: "PATCH", body: { name }, auth: "user", errorMessage: "Failed to rename project" });
+export const deleteProject = (id) => request(`/projects/${id}`, { method: "DELETE", auth: "user", errorMessage: "Failed to delete project" });
+
 export const createApiKey = (projectId) =>
-  request(`/projects/${projectId}/api-keys`, { method: "POST", body: {}, errorMessage: "Failed to issue API key" });
-export const deleteProject = (id) => request(`/projects/${id}`, { method: "DELETE", errorMessage: "Failed to delete project" });
+  request(`/projects/${projectId}/api-keys`, { method: "POST", body: {}, auth: "user", errorMessage: "Failed to issue API key" });
+export const getApiKeys = (projectId) => request(`/projects/${projectId}/api-keys`, { auth: "user", errorMessage: "Failed to load API keys" });
+export const revokeApiKey = (projectId, keyId) =>
+  request(`/projects/${projectId}/api-keys/${keyId}`, { method: "DELETE", auth: "user", errorMessage: "Failed to revoke API key" });
+
+// Team members & invites — v1 invites are a copy/paste link (shown once).
+export const getMembers = (projectId) => request(`/projects/${projectId}/members`, { auth: "user", errorMessage: "Failed to load members" });
+export const updateMemberRole = (projectId, userId, role) =>
+  request(`/projects/${projectId}/members/${userId}`, { method: "PATCH", body: { role }, auth: "user", errorMessage: "Failed to update role" });
+export const removeMember = (projectId, userId) =>
+  request(`/projects/${projectId}/members/${userId}`, { method: "DELETE", auth: "user", errorMessage: "Failed to remove member" });
+export const getInvites = (projectId) => request(`/projects/${projectId}/invites`, { auth: "user", errorMessage: "Failed to load invites" });
+export const createInvite = (projectId, payload) =>
+  request(`/projects/${projectId}/invites`, { method: "POST", body: payload, auth: "user", errorMessage: "Failed to create invite" });
+export const revokeInvite = (projectId, inviteId) =>
+  request(`/projects/${projectId}/invites/${inviteId}`, { method: "DELETE", auth: "user", errorMessage: "Failed to revoke invite" });
+export const acceptInvite = (token) =>
+  request("/invites/accept", { method: "POST", body: { token }, auth: "user", errorMessage: "Failed to accept invite" });

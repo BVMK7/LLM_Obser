@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { getProviderStatus, runEvaluationOne, getDatasets, getDataset, createDataset, getScorers, createExperiment } from "../api";
+import { getProviderStatus, runEvaluationOne, getDatasets, getDataset, createDataset, getScorers, createExperiment, API_BASE } from "../api";
 import MetricCard from "../components/MetricCard";
 import StatusPill from "../components/StatusPill";
 import { downloadFile, formatTokens, percentile, toCSV } from "../utils";
@@ -358,7 +358,7 @@ export default function Evaluation() {
 
       {error && (
         <div className="text-red-400 mb-6">
-          Couldn't reach the API — is it running at http://localhost:8010? ({error})
+          Couldn't reach the API at {API_BASE} — is it running/reachable, and is your API key valid? ({error})
         </div>
       )}
 

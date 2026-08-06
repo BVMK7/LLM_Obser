@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
-import { getTraces } from "../api";
+import { getTraces, API_BASE } from "../api";
 import MetricCard from "../components/MetricCard";
 import ProviderHeatmap from "../components/ProviderHeatmap";
 import Skeleton from "../components/Skeleton";
@@ -73,7 +73,7 @@ export default function CostUsage() {
   if (error) {
     return (
       <div className="text-red-400">
-        Couldn't reach the API — is it running at http://localhost:8010? ({error})
+        Couldn't reach the API at {API_BASE} — is it running/reachable, and is your API key valid? ({error})
       </div>
     );
   }

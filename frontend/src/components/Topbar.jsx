@@ -1,16 +1,21 @@
 import { useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
-import { useTheme } from "../theme";
 import ProjectSwitcher from "./ProjectSwitcher";
+import { LampIcon } from "./icons";
+import { useAuth } from "../AuthContext";
 
 // Full-width chrome bar above the page content. Per product decision, the
-// avatar is static decoration; the theme toggle and (on the Traces page) the
-// search box are wired to real behavior.
+// avatar is static decoration; the search box (on the Traces page) and the
+// logout button are wired to real behavior.
 export default function Topbar() {
-  const [theme, toggleTheme] = useTheme();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
+  const { user, logout } = useAuth();
   const isTracesPage = location.pathname === "/traces";
+
+  const handleLogout = () => {
+    logout().then(() => window.location.assign("/login"));
+  };
   // Kept as a fallback so the input stays controlled (avoids a React
   // controlled/uncontrolled warning) when navigating off the Traces page.
   const [decorativeQuery, setDecorativeQuery] = useState("");
@@ -30,8 +35,8 @@ export default function Topbar() {
     <header className="h-16 shrink-0 flex items-center justify-between px-6 border-b border-[var(--border-subtle)] bg-[var(--bg-sidebar)]">
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2 shrink-0">
-          <div className="w-8 h-8 bg-[var(--brand-primary)] flex items-center justify-center font-bold text-white">
-            O
+          <div className="w-8 h-8 bg-[var(--brand-primary)] flex items-center justify-center text-white">
+            <LampIcon className="w-5 h-5" />
           </div>
           <div>
             <div className="font-semibold text-sm text-[var(--text-primary)] leading-tight">Observability</div>
@@ -54,17 +59,17 @@ export default function Topbar() {
 
       <div className="flex items-center gap-3">
         <ProjectSwitcher />
-        <button
-          onClick={toggleTheme}
-          title="Toggle theme"
-          className="w-8 h-8 flex items-center justify-center rounded-lg border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
-        >
-          {theme === "dark" ? "☀" : "☾"}
-        </button>
         <button className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-[var(--brand-primary)] to-[var(--brand-danger)] text-white text-sm font-medium hover:opacity-90 transition-opacity">
           Deploy Model
         </button>
         <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--brand-primary)] to-[var(--brand-success)]" />
+        <button
+          onClick={handleLogout}
+          title={user ? `Log out (${user.email})` : "Log out"}
+          className="w-8 h-8 flex items-center justify-center border border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--brand-danger)] hover:border-[var(--brand-danger)]/50 transition-colors text-xs"
+        >
+          ⏻
+        </button>
       </div>
     </header>
   );

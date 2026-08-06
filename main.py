@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
+import bcrypt
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,8 +76,124 @@ class ApiKey(Base):
     revoked_at = Column(DateTime(timezone=True))
 
 
+# A User is a real human account — separate entirely from ApiKey. Api keys
+# authenticate the SDK/data-plane (traces, spans, etc); Users authenticate
+# people managing a project (settings, team, billing) via the dashboard.
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    email = Column(String, nullable=False, unique=True)
+    password_hash = Column(String, nullable=False)
+    name = Column(String)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+
+
+# A DB-backed opaque session token — same hash-only-storage shape as
+# ApiKey, presented as "Authorization: Bearer <token>".
+class UserSession(Base):
+    __tablename__ = "sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    token_hash = Column(String, nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True))
+
+
+# How a Project relates to a User — this is what makes a project's settings
+# invisible to users who don't belong to it (see require_membership below).
+class ProjectMember(Base):
+    __tablename__ = "project_members"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String, nullable=False)  # "admin" | "viewer"
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+
+
+# v1 team invites are a copy/paste link (no email service in this app) —
+# token hashed like an API key, shown once at creation time.
+class ProjectInvite(Base):
+    __tablename__ = "project_invites"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    email = Column(String, nullable=False)
+    role = Column(String, nullable=False)  # "admin" | "viewer"
+    token_hash = Column(String, nullable=False, unique=True)
+    invited_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    accepted_at = Column(DateTime(timezone=True))
+    revoked_at = Column(DateTime(timezone=True))
+
+
 def _hash_api_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode()).hexdigest()
+
+
+def _hash_session_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+def _issue_session(db: Session, user_id) -> str:
+    raw_token = f"llmobs_sess_{secrets.token_urlsafe(32)}"
+    db_session = UserSession(
+        user_id=user_id,
+        token_hash=_hash_session_token(raw_token),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+    )
+    db.add(db_session)
+    db.commit()
+    return raw_token
+
+
+def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> User:
+    """FastAPI dependency: resolves the 'Authorization: Bearer <token>' header
+    to the logged-in User. Separate from get_current_project entirely — this
+    gates project MANAGEMENT (settings/team/api-keys/billing), never the
+    trace-ingestion data plane."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization: Bearer <token> header")
+    raw_token = authorization[len("Bearer "):].strip()
+    token_hash = _hash_session_token(raw_token)
+    now = datetime.now(timezone.utc)
+    session = (
+        db.query(UserSession)
+        .filter(UserSession.token_hash == token_hash, UserSession.revoked_at.is_(None), UserSession.expires_at > now)
+        .first()
+    )
+    if session is None:
+        raise HTTPException(status_code=401, detail="Invalid, expired, or revoked session")
+    return db.get(User, session.user_id)
+
+
+def require_membership(min_role: Literal["viewer", "admin"] = "viewer"):
+    """FastAPI dependency factory: the caller must be a member of the
+    :project_id path parameter with at least `min_role`. 404s (not 403) when
+    there's no membership at all, so a non-member can't tell a project exists
+    versus never having existed."""
+
+    def _dependency(
+        project_id: uuid.UUID,
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> ProjectMember:
+        membership = (
+            db.query(ProjectMember)
+            .filter(ProjectMember.project_id == project_id, ProjectMember.user_id == user.id)
+            .first()
+        )
+        if membership is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if min_role == "admin" and membership.role != "admin":
+            raise HTTPException(status_code=403, detail="Admin role required")
+        return membership
+
+    return _dependency
 
 
 def get_current_project(x_api_key: Optional[str] = Header(None), db: Session = Depends(get_db)) -> Project:
@@ -601,20 +718,100 @@ class ProjectCreateResponse(ProjectResponse):
 # 5. The FastAPI app itself.
 app = FastAPI()
 
-# Allow the React dashboard (running on its own dev server port) to call this API.
+# Allow the React dashboard to call this API. FRONTEND_ORIGINS is a
+# comma-separated list (env-driven so a deployed frontend origin — not just
+# the local dev server — can be allow-listed without a code change); falls
+# back to the local dev server if unset.
+_frontend_origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=_frontend_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# POST /projects — onboard a new customer: creates a Project and its first
-# ApiKey, returning the raw key exactly once. Intentionally unauthenticated
-# (no admin login exists yet — see the plan's explicitly-deferred list) so a
-# demo/onboarding flow can call this directly; it does not expose or modify
-# any other project's data.
+# ---------------------------------------------------------------------------
+# Auth — real user accounts (signup/login/session), entirely separate from
+# the X-API-Key data plane. Gates project management (settings/team/api
+# keys/billing), never trace ingestion.
+# ---------------------------------------------------------------------------
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    name: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SessionResponse(BaseModel):
+    user: UserResponse
+    session_token: str
+
+
+@app.post("/auth/signup", response_model=SessionResponse)
+def signup(body: SignupRequest, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(func.lower(User.email) == body.email.lower()).first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+    password_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
+    db_user = User(email=body.email.lower(), password_hash=password_hash, name=body.name)
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    token = _issue_session(db, db_user.id)
+    return SessionResponse(user=UserResponse.model_validate(db_user), session_token=token)
+
+
+
+# A fixed dummy hash to check the submitted password against when no user
+# matches the email — without this, a nonexistent email short-circuits
+# before ever calling bcrypt.checkpw, and the latency difference lets an
+# attacker distinguish "no account" from "wrong password" (email enumeration).
+_DUMMY_PASSWORD_HASH = bcrypt.hashpw(b"", bcrypt.gensalt()).decode()
+
+
+@app.post("/auth/login", response_model=SessionResponse)
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(func.lower(User.email) == body.email.lower()).first()
+    password_hash = db_user.password_hash if db_user else _DUMMY_PASSWORD_HASH
+    password_ok = bcrypt.checkpw(body.password.encode(), password_hash.encode())
+    if db_user is None or not password_ok:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = _issue_session(db, db_user.id)
+    return SessionResponse(user=UserResponse.model_validate(db_user), session_token=token)
+
+
+@app.get("/auth/me", response_model=UserResponse)
+def get_me(user: User = Depends(get_current_user)):
+    return UserResponse.model_validate(user)
+
+
+@app.post("/auth/logout")
+def logout(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
+    if authorization and authorization.lower().startswith("bearer "):
+        raw_token = authorization[len("Bearer "):].strip()
+        session = db.query(UserSession).filter(UserSession.token_hash == _hash_session_token(raw_token)).first()
+        if session is not None:
+            session.revoked_at = datetime.now(timezone.utc)
+            db.commit()
+    return {"ok": True}
+
+
+# POST /projects — onboard a new customer: creates a Project, its first
+# ApiKey (returned raw exactly once), and makes the creator an admin member.
 def _issue_api_key(db: Session, project_id) -> str:
     raw_key = f"llmobs_{secrets.token_urlsafe(32)}"
     db_key = ApiKey(
@@ -628,11 +825,14 @@ def _issue_api_key(db: Session, project_id) -> str:
 
 
 @app.post("/projects", response_model=ProjectCreateResponse)
-def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
+def create_project(project: ProjectCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     db_project = Project(name=project.name)
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
+
+    db.add(ProjectMember(project_id=db_project.id, user_id=user.id, role="admin"))
+    db.commit()
 
     raw_key = _issue_api_key(db, db_project.id)
     return ProjectCreateResponse(id=db_project.id, name=db_project.name, created_at=db_project.created_at, api_key=raw_key)
@@ -652,21 +852,51 @@ class ApiKeyCreateResponse(BaseModel):
 
 
 @app.post("/projects/{project_id}/api-keys", response_model=ApiKeyCreateResponse)
-def create_api_key(project_id: uuid.UUID, db: Session = Depends(get_db)):
-    db_project = db.get(Project, project_id)
-    if db_project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-
+def create_api_key(project_id: uuid.UUID, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
     raw_key = _issue_api_key(db, project_id)
     db_key = db.query(ApiKey).filter(ApiKey.key_hash == _hash_api_key(raw_key)).first()
     return ApiKeyCreateResponse(id=db_key.id, project_id=project_id, api_key=raw_key, created_at=db_key.created_at)
 
 
-# GET /projects — lists every project (name + id only, no keys). Backs the
-# frontend's project switcher.
+# GET /projects/{project_id}/api-keys — lists this project's keys (prefix +
+# lifecycle timestamps only — the raw key is never re-exposed after creation).
+class ApiKeyResponse(BaseModel):
+    id: uuid.UUID
+    key_prefix: str
+    created_at: datetime
+    revoked_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+@app.get("/projects/{project_id}/api-keys", response_model=list[ApiKeyResponse])
+def list_api_keys(project_id: uuid.UUID, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
+    return db.query(ApiKey).filter(ApiKey.project_id == project_id).order_by(ApiKey.created_at.desc()).all()
+
+
+# DELETE /projects/{project_id}/api-keys/{key_id} — revokes a key. Every
+# X-API-Key-gated endpoint already filters on `revoked_at IS NULL` (see
+# get_current_project), so this takes effect immediately with no other change.
+@app.delete("/projects/{project_id}/api-keys/{key_id}")
+def revoke_api_key(project_id: uuid.UUID, key_id: uuid.UUID, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
+    db_key = db.query(ApiKey).filter(ApiKey.id == key_id, ApiKey.project_id == project_id).first()
+    if db_key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    db_key.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True}
+
+
+# GET /projects — lists only the projects the logged-in user belongs to.
 @app.get("/projects", response_model=list[ProjectResponse])
-def list_projects(db: Session = Depends(get_db)):
-    return db.query(Project).order_by(Project.created_at.asc()).all()
+def list_projects(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return (
+        db.query(Project)
+        .join(ProjectMember, ProjectMember.project_id == Project.id)
+        .filter(ProjectMember.user_id == user.id)
+        .order_by(Project.created_at.asc())
+        .all()
+    )
 
 
 # The fixed id the projects/api_keys migration inserts for the "Default
@@ -675,22 +905,175 @@ def list_projects(db: Session = Depends(get_db)):
 _DEFAULT_PROJECT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
+class ProjectUpdate(BaseModel):
+    name: str
+
+
+# PATCH /projects/{project_id} — rename. Admin-only.
+@app.patch("/projects/{project_id}", response_model=ProjectResponse)
+def update_project(project_id: uuid.UUID, body: ProjectUpdate, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
+    db_project = db.get(Project, project_id)
+    db_project.name = body.name
+    db.commit()
+    db.refresh(db_project)
+    return db_project
+
+
 # DELETE /projects/{project_id} — removes a project and everything under it
 # (traces, spans, scores, datasets, prompts, scorers, experiments, alert
-# rules, api keys) via the ON DELETE CASCADE foreign keys already in place —
-# see create_projects_and_api_keys.sql. Same unauthenticated demo-scope
-# tradeoff as the other /projects endpoints (no admin login exists yet).
+# rules, api keys, memberships, invites) via the ON DELETE CASCADE foreign
+# keys already in place. Admin-only.
 @app.delete("/projects/{project_id}")
-def delete_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
+def delete_project(project_id: uuid.UUID, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
     if project_id == _DEFAULT_PROJECT_ID:
         raise HTTPException(status_code=400, detail="Cannot delete the Default Project")
     db_project = db.get(Project, project_id)
-    if db_project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-
     db.delete(db_project)
     db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Team members & invites — v1 invites are a copy/paste link (no email
+# service in this app), same "shown once" pattern as an API key.
+# ---------------------------------------------------------------------------
+class MemberResponse(BaseModel):
+    user_id: uuid.UUID
+    email: str
+    name: Optional[str] = None
+    role: str
+    created_at: datetime
+
+
+@app.get("/projects/{project_id}/members", response_model=list[MemberResponse])
+def list_members(project_id: uuid.UUID, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("viewer"))):
+    rows = (
+        db.query(ProjectMember, User)
+        .join(User, User.id == ProjectMember.user_id)
+        .filter(ProjectMember.project_id == project_id)
+        .order_by(ProjectMember.created_at.asc())
+        .all()
+    )
+    return [
+        MemberResponse(user_id=u.id, email=u.email, name=u.name, role=pm.role, created_at=pm.created_at)
+        for pm, u in rows
+    ]
+
+
+def _member_count(db: Session, project_id: uuid.UUID, role: str) -> int:
+    return db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.role == role).count()
+
+
+class MemberRoleUpdate(BaseModel):
+    role: Literal["admin", "viewer"]
+
+
+@app.patch("/projects/{project_id}/members/{user_id}")
+def update_member_role(project_id: uuid.UUID, user_id: uuid.UUID, body: MemberRoleUpdate, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
+    target = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target.role == "admin" and body.role != "admin" and _member_count(db, project_id, "admin") <= 1:
+        raise HTTPException(status_code=400, detail="Can't demote the last remaining admin")
+    target.role = body.role
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/projects/{project_id}/members/{user_id}")
+def remove_member(project_id: uuid.UUID, user_id: uuid.UUID, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
+    target = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == user_id).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target.role == "admin" and _member_count(db, project_id, "admin") <= 1:
+        raise HTTPException(status_code=400, detail="Can't remove the last remaining admin")
+    db.delete(target)
+    db.commit()
+    return {"ok": True}
+
+
+class InviteCreate(BaseModel):
+    email: str
+    role: Literal["admin", "viewer"] = "viewer"
+
+
+class InviteCreateResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    role: str
+    token: str
+    expires_at: datetime
+
+
+@app.post("/projects/{project_id}/invites", response_model=InviteCreateResponse)
+def create_invite(project_id: uuid.UUID, body: InviteCreate, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin")), user: User = Depends(get_current_user)):
+    raw_token = f"llmobs_invite_{secrets.token_urlsafe(32)}"
+    db_invite = ProjectInvite(
+        project_id=project_id,
+        email=body.email.lower(),
+        role=body.role,
+        token_hash=_hash_session_token(raw_token),
+        invited_by_user_id=user.id,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+    )
+    db.add(db_invite)
+    db.commit()
+    db.refresh(db_invite)
+    return InviteCreateResponse(id=db_invite.id, email=db_invite.email, role=db_invite.role, token=raw_token, expires_at=db_invite.expires_at)
+
+
+class InviteResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    role: str
+    created_at: datetime
+    expires_at: datetime
+    accepted_at: Optional[datetime] = None
+
+
+@app.get("/projects/{project_id}/invites", response_model=list[InviteResponse])
+def list_invites(project_id: uuid.UUID, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
+    return (
+        db.query(ProjectInvite)
+        .filter(ProjectInvite.project_id == project_id, ProjectInvite.revoked_at.is_(None))
+        .order_by(ProjectInvite.created_at.desc())
+        .all()
+    )
+
+
+@app.delete("/projects/{project_id}/invites/{invite_id}")
+def revoke_invite(project_id: uuid.UUID, invite_id: uuid.UUID, db: Session = Depends(get_db), membership: ProjectMember = Depends(require_membership("admin"))):
+    db_invite = db.query(ProjectInvite).filter(ProjectInvite.id == invite_id, ProjectInvite.project_id == project_id).first()
+    if db_invite is None:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    db_invite.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True}
+
+
+class InviteAccept(BaseModel):
+    token: str
+
+
+@app.post("/invites/accept")
+def accept_invite(body: InviteAccept, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    now = datetime.now(timezone.utc)
+    db_invite = (
+        db.query(ProjectInvite)
+        .filter(ProjectInvite.token_hash == _hash_session_token(body.token), ProjectInvite.revoked_at.is_(None), ProjectInvite.accepted_at.is_(None), ProjectInvite.expires_at > now)
+        .first()
+    )
+    if db_invite is None:
+        raise HTTPException(status_code=400, detail="Invite is invalid, expired, or already used")
+    if db_invite.email.lower() != user.email.lower():
+        raise HTTPException(status_code=403, detail="This invite was sent to a different email address")
+
+    existing = db.query(ProjectMember).filter(ProjectMember.project_id == db_invite.project_id, ProjectMember.user_id == user.id).first()
+    if existing is None:
+        db.add(ProjectMember(project_id=db_invite.project_id, user_id=user.id, role=db_invite.role))
+    db_invite.accepted_at = now
+    db.commit()
+    return {"ok": True, "project_id": db_invite.project_id}
 
 
 # GET /providers/status — which providers have an API key configured in .env.
