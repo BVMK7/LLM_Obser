@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../AuthContext";
+import AuthShell from "../components/AuthShell";
 
 export default function Signup() {
   const { signup } = useAuth();
@@ -28,7 +29,7 @@ export default function Signup() {
   };
 
   return (
-    <div className="h-screen flex items-center justify-center bg-[var(--bg-app)]">
+    <AuthShell>
       <form
         onSubmit={handleSubmit}
         className="bg-[var(--bg-card)] border border-[var(--border-subtle)] p-8 w-full max-w-sm"
@@ -84,6 +85,6 @@ export default function Signup() {
           </Link>
         </p>
       </form>
-    </div>
+    </AuthShell>
   );
 }

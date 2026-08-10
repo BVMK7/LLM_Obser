@@ -107,3 +107,46 @@ main > div > p {
 *::after {
   border-radius: 0 !important;
 }
+
+/* Login/Signup background — a radiating sunburst (repeating-conic-gradient)
+   over a faint square grid (two repeating-linear-gradients), independent of
+   the app-wide --bg-app/--bg-card tokens above since it's specific to the
+   auth pages. --auth-* is redefined per data-theme so both themes render
+   the exact same pattern, just recolored. */
+.auth-page {
+  position: relative;
+  --auth-bg: #17181d;
+  --auth-ray: rgba(255, 255, 255, 0.045);
+  --auth-grid: rgba(255, 255, 255, 0.07);
+  background-color: var(--auth-bg);
+  background-image:
+    repeating-conic-gradient(from 0deg at 50% 45%, var(--auth-ray) 0deg 7.5deg, transparent 7.5deg 15deg),
+    repeating-linear-gradient(to right, var(--auth-grid) 0 1px, transparent 1px 64px),
+    repeating-linear-gradient(to bottom, var(--auth-grid) 0 1px, transparent 1px 64px);
+}
+
+.auth-page[data-theme="light"] {
+  --auth-bg: #eef0f4;
+  --auth-ray: rgba(0, 0, 0, 0.04);
+  --auth-grid: rgba(0, 0, 0, 0.08);
+}
+
+.auth-theme-toggle {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #d5d7dc;
+  cursor: pointer;
+}
+.auth-page[data-theme="light"] .auth-theme-toggle {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.12);
+  color: #43454d;
+}
