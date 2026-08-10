@@ -5,7 +5,7 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 216,
+    "latency_ms": 290,
     "cost": 2.74e-06,
     "error": null
   },
@@ -15,7 +15,7 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 237,
+    "latency_ms": 137,
     "cost": 2.87e-06,
     "error": null
   },
@@ -25,18 +25,18 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 119,
-    "cost": 3.99e-06,
+    "latency_ms": 158,
+    "cost": 2.87e-06,
     "error": null
   },
   {
     "question": "Who wrote Romeo and Juliet?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 1.0,
+    "faithfulness": 0.8,
     "relevance": 1.0,
-    "latency_ms": 268,
-    "cost": 5.17e-06,
+    "latency_ms": 498,
+    "cost": 6.85e-06,
     "error": null
   },
   {
@@ -45,8 +45,8 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 211,
-    "cost": 5.24e-06,
+    "latency_ms": 229,
+    "cost": 3.08e-06,
     "error": null
   },
   {
@@ -55,8 +55,8 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 176,
-    "cost": 7.19e-06,
+    "latency_ms": 526,
+    "cost": 1.0150000000000001e-05,
     "error": null
   }
 ]
