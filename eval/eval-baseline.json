@@ -5,7 +5,7 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 276,
+    "latency_ms": 271,
     "cost": 2.74e-06,
     "error": null
   },
@@ -13,10 +13,10 @@
     "question": "What is 12 + 30?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 1.0,
+    "faithfulness": 0.95,
     "relevance": 1.0,
-    "latency_ms": 648,
-    "cost": 2.87e-06,
+    "latency_ms": 117,
+    "cost": 2.79e-06,
     "error": null
   },
   {
@@ -25,18 +25,18 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 128,
-    "cost": 3.75e-06,
+    "latency_ms": 259,
+    "cost": 3.91e-06,
     "error": null
   },
   {
     "question": "Who wrote Romeo and Juliet?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 0.8,
+    "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 146,
-    "cost": 7.89e-06,
+    "latency_ms": 190,
+    "cost": 5.57e-06,
     "error": null
   },
   {
@@ -45,18 +45,18 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 178,
-    "cost": 3.08e-06,
+    "latency_ms": 193,
+    "cost": 6.28e-06,
     "error": null
   },
   {
     "question": "What is the largest ocean on Earth?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 0.9,
+    "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 185,
-    "cost": 8.710000000000001e-06,
+    "latency_ms": 256,
+    "cost": 8.15e-06,
     "error": null
   }
 ]
