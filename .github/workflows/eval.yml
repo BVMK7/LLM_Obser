@@ -69,8 +69,8 @@ jobs:
           for f in create_traces.sql create_spans.sql create_scores.sql create_prompts.sql \
                    create_datasets.sql add_model_to_traces.sql create_scorers.sql \
                    create_experiments.sql create_prompt_versions.sql create_alert_rules.sql \
-                   add_review_and_span_hierarchy.sql create_projects_and_api_keys.sql \
-                   create_users_and_project_members.sql; do
+                   add_review_and_span_hierarchy.sql add_session_and_span_scores.sql \
+                   create_projects_and_api_keys.sql create_users_and_project_members.sql; do
             PGPASSWORD=llm_observability psql -h localhost -p 5433 -U llm_observability -d llm_observability -f "$f"
           done
 

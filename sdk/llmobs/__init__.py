@@ -48,16 +48,35 @@ class Client:
         resp.raise_for_status()
         return resp.json()
 
-    def traced(self, name: str):
+    def log_score(self, trace_id: str, score_name: str, score_value: float, explanation: str = None, span_id: str = None):
+        """Logs a score (e.g. an LLM-judged rating) for a trace, or for one
+        span within it if `span_id` is given."""
+        return self._post(
+            "/scores",
+            {
+                "trace_id": trace_id,
+                "score_name": score_name,
+                "score_value": score_value,
+                "explanation": explanation,
+                "span_id": span_id,
+            },
+        )
+
+    def traced(self, name: str, session_id: str = None):
         """Use as a decorator (`@client.traced("step")`) or a context manager
-        (`with client.traced("step"):`). Returns a _TracedBlock — see below."""
-        return _TracedBlock(self, name)
+        (`with client.traced("step"):`). Returns a _TracedBlock — see below.
+
+        `session_id` groups this trace with others from the same multi-turn
+        conversation; only meaningful on the outermost (trace-creating) call
+        — ignored when this block ends up nested under an existing trace."""
+        return _TracedBlock(self, name, session_id)
 
 
 class _TracedBlock:
-    def __init__(self, client: Client, name: str):
+    def __init__(self, client: Client, name: str, session_id: str = None):
         self.client = client
         self.name = name
+        self.session_id = session_id
         self._input = None
         self._output = None
 
@@ -95,7 +114,12 @@ class _TracedBlock:
             if self.parent is None or self.parent.trace_id is None:
                 trace = self.client._post(
                     "/traces",
-                    {"name": self.name, "input": self._input, "started_at": self.started_at.isoformat()},
+                    {
+                        "name": self.name,
+                        "input": self._input,
+                        "started_at": self.started_at.isoformat(),
+                        "session_id": self.session_id,
+                    },
                 )
                 self.trace_id = trace["id"]
             else:

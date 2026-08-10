@@ -236,6 +236,10 @@ class Trace(Base):
     # (e.g. off the back of a bad user_feedback score) and can leave a note.
     flagged_for_review = Column(Boolean, nullable=False, server_default="false")
     review_note = Column(Text)
+    # Groups traces that belong to the same multi-turn conversation/session —
+    # NULL for a standalone trace. Not a foreign key: sessions aren't a table,
+    # just a shared UUID the caller mints and reuses across traces.
+    session_id = Column(UUID(as_uuid=True), index=True)
 
     # Lets us access trace.spans / trace.scores in Python; SQLAlchemy loads
     # them with a second query the first time they're accessed.
@@ -269,6 +273,10 @@ class Score(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
     trace_id = Column(UUID(as_uuid=True), ForeignKey("traces.id", ondelete="CASCADE"), nullable=False)
+    # Optional: scopes the score to one span within the trace rather than the
+    # trace as a whole (e.g. judging a single retrieval step) — NULL means
+    # the score applies to the trace overall.
+    span_id = Column(UUID(as_uuid=True), ForeignKey("spans.id", ondelete="CASCADE"))
     score_name = Column(String, nullable=False)
     score_value = Column(Numeric, nullable=False)
     explanation = Column(Text)
@@ -417,6 +425,7 @@ class TraceCreate(BaseModel):
     total_tokens: Optional[int] = None
     cost: Optional[float] = None
     model: Optional[str] = None
+    session_id: Optional[uuid.UUID] = None
 
 
 # TraceResponse = the shape of the JSON we send back (includes DB-generated fields).
@@ -467,6 +476,7 @@ class SpanUpdate(BaseModel):
 # ScoreCreate = the shape of the request body sent to POST /scores.
 class ScoreCreate(BaseModel):
     trace_id: uuid.UUID
+    span_id: Optional[uuid.UUID] = None
     score_name: str
     score_value: float
     explanation: Optional[str] = None
@@ -1116,8 +1126,15 @@ def create_trace(trace: TraceCreate, db: Session = Depends(get_db), project: Pro
 # `status` isn't a DB column — it's derived here from whether any child span
 # recorded an error, using the spans.error column added earlier.
 @app.get("/traces", response_model=list[TraceResponse])
-def list_traces(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
-    traces = db.query(Trace).filter(Trace.project_id == project.id).order_by(Trace.started_at.desc()).all()
+def list_traces(
+    session_id: Optional[uuid.UUID] = None,
+    db: Session = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    query = db.query(Trace).filter(Trace.project_id == project.id)
+    if session_id is not None:
+        query = query.filter(Trace.session_id == session_id)
+    traces = query.order_by(Trace.started_at.desc()).all()
 
     error_trace_ids = {
         row[0]
@@ -1279,6 +1296,11 @@ def create_score(score: ScoreCreate, db: Session = Depends(get_db), project: Pro
     parent_trace = db.get(Trace, score.trace_id)
     if parent_trace is None or parent_trace.project_id != project.id:
         raise HTTPException(status_code=404, detail="Trace not found")
+
+    if score.span_id is not None:
+        span = db.get(Span, score.span_id)
+        if span is None or span.trace_id != score.trace_id:
+            raise HTTPException(status_code=400, detail="span_id must reference a span on the same trace")
 
     db_score = Score(**score.model_dump(exclude_unset=True))
 
