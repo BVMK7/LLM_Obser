@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
+from urllib.parse import urlparse
 
 import bcrypt
 import httpx
@@ -2245,10 +2246,30 @@ def _due_alert_rules(db: Session) -> list["AlertRule"]:
     return db.query(AlertRule).filter(AlertRule.enabled.is_(True), AlertRule.webhook_url.isnot(None)).all()
 
 
+def _is_discord_webhook(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return host.endswith("discord.com") or host.endswith("discordapp.com")
+
+
+# Discord's webhook API rejects any body without a "content"/"embeds"/etc.
+# key ("Cannot send an empty message") — our generic payload has neither, so
+# a Discord URL needs its own message shape. Every other webhook_url still
+# gets the plain payload dict, unchanged from what's documented/verified.
+def _format_discord_payload(payload: dict) -> dict:
+    lines = [
+        f"**Alert triggered: {payload['rule_name']}**",
+        f"Metric: `{payload['metric']}` {payload['comparator']} {payload['threshold']}",
+        f"Current value: `{payload['current_value']}`",
+        f"Triggered at: {payload['triggered_at']}",
+    ]
+    return {"content": "\n".join(lines)}
+
+
 async def _post_alert_webhook(url: str, payload: dict) -> bool:
+    body = _format_discord_payload(payload) if _is_discord_webhook(url) else payload
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=body)
             resp.raise_for_status()
         return True
     except Exception as e:
