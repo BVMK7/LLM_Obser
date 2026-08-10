@@ -3,22 +3,25 @@ Minimal FastAPI + SQLAlchemy app for the llm_observability database.
 Run with: uvicorn main:app --reload
 """
 
+import asyncio
 import hashlib
 import json
 import os
 import re
 import secrets
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 import bcrypt
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, func
+from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, exists, func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
@@ -349,6 +352,11 @@ class Scorer(Base):
     prompt_template = Column(Text, nullable=False)
     choice_scores = Column(JSONB, nullable=False, server_default="{}")
     pass_threshold = Column(Numeric, nullable=False, server_default="0.5")
+    # Opt-in continuous scoring: when true, _online_scoring_loop runs this
+    # scorer against new traces automatically (see below). Opt-in, not
+    # automatic for every scorer, since that would be an uncontrolled LLM
+    # cost — off by default.
+    run_online = Column(Boolean, nullable=False, server_default="false")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default="now()", onupdate=func.now())
 
@@ -411,6 +419,14 @@ class AlertRule(Base):
     threshold = Column(Numeric, nullable=False)
     window_minutes = Column(Integer, nullable=False, server_default="60")
     enabled = Column(Boolean, nullable=False, server_default="true")
+    # Optional outbound webhook for real notifications (see
+    # _alert_notification_loop below) — NULL means "no notification, status
+    # only visible via GET /alerts/status" (unchanged existing behavior).
+    webhook_url = Column(Text)
+    # Cooldown bookkeeping so a still-triggered rule notifies once per
+    # window_minutes, not once per 60s poll tick — internal only, never
+    # exposed on AlertRuleCreate/AlertRuleResponse.
+    last_notified_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
 
 
@@ -615,6 +631,7 @@ class ScorerCreate(BaseModel):
     prompt_template: str
     choice_scores: dict[str, float]
     pass_threshold: float = 0.5
+    run_online: bool = False
 
 
 class ScorerResponse(ScorerCreate):
@@ -635,6 +652,7 @@ class AlertRuleCreate(BaseModel):
     threshold: float
     window_minutes: int = 60
     enabled: bool = True
+    webhook_url: Optional[str] = None
 
 
 class AlertRuleResponse(AlertRuleCreate):
@@ -738,7 +756,33 @@ class ProjectCreateResponse(ProjectResponse):
 
 
 # 5. The FastAPI app itself.
-app = FastAPI()
+# lifespan starts the two background polling loops (continuous scoring,
+# alert webhook notifications — see _online_scoring_loop/_alert_notification_
+# loop below, defined near the functions they reuse) on startup, and cancels
+# them cleanly on shutdown. No task-queue dependency: each is a plain
+# `while True: ...; await asyncio.sleep(N)` asyncio task. Referencing the
+# loop functions here works even though they're defined later in the file —
+# Python only looks them up by name when the task actually starts, which
+# happens well after the whole module has finished loading.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    background_tasks = [
+        asyncio.create_task(_online_scoring_loop()),
+        asyncio.create_task(_alert_notification_loop()),
+    ]
+    try:
+        yield
+    finally:
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Allow the React dashboard to call this API. FRONTEND_ORIGINS is a
 # comma-separated list (env-driven so a deployed frontend origin — not just
@@ -1729,6 +1773,66 @@ def _run_custom_scorer(scorer: "Scorer", question: str, answer: str, expected: O
         return {"label": None, "score": None, "explanation": f"(scorer failed: {e})"}
 
 
+# ---------------------------------------------------------------------------
+# Continuous (online) scoring — a background loop that runs any scorer with
+# run_online=True against new traces automatically, reusing _run_custom_
+# scorer above as-is. See `lifespan` for how this loop is started/stopped.
+# ---------------------------------------------------------------------------
+_ONLINE_SCORING_INTERVAL_SECONDS = 60
+_ONLINE_SCORING_BATCH_SIZE = 20  # per scorer per project per poll — bounds LLM calls/tick
+
+
+def _run_online_scoring_once(db: Session) -> None:
+    """One poll tick, fully synchronous (DB + Groq calls) — run via
+    asyncio.to_thread so it never blocks the event loop. Each project and
+    each scorer is wrapped in its own try/except so one bad project/scorer/
+    trace can't stop the rest of the sweep."""
+    for project in db.query(Project).all():
+        try:
+            online_scorers = db.query(Scorer).filter(Scorer.project_id == project.id, Scorer.run_online.is_(True)).all()
+        except Exception as e:
+            print(f"[online-scoring] failed to load scorers for project {project.id}: {e}")
+            continue
+
+        for scorer in online_scorers:
+            try:
+                not_yet_scored = ~exists().where(Score.trace_id == Trace.id, Score.score_name == scorer.slug)
+                traces = (
+                    db.query(Trace)
+                    .filter(Trace.project_id == project.id, Trace.output.isnot(None), not_yet_scored)
+                    .order_by(Trace.started_at.desc())
+                    .limit(_ONLINE_SCORING_BATCH_SIZE)
+                    .all()
+                )
+            except Exception as e:
+                print(f"[online-scoring] failed to find unscored traces for scorer {scorer.slug!r} (project {project.id}): {e}")
+                continue
+
+            for trace in traces:
+                try:
+                    result = _run_custom_scorer(scorer, question=trace.input, answer=trace.output, expected=None)
+                    if result["score"] is None:
+                        print(f"[online-scoring] scorer {scorer.slug!r} skipped trace {trace.id}: {result['explanation']}")
+                        continue
+                    db.add(Score(trace_id=trace.id, score_name=scorer.slug, score_value=result["score"], explanation=result["explanation"]))
+                    db.commit()
+                except Exception as e:
+                    db.rollback()
+                    print(f"[online-scoring] failed to score trace {trace.id} with scorer {scorer.slug!r}: {e}")
+
+
+async def _online_scoring_loop():
+    while True:
+        db = SessionLocal()
+        try:
+            await asyncio.to_thread(_run_online_scoring_once, db)
+        except Exception as e:
+            print(f"[online-scoring] loop iteration failed: {e}")
+        finally:
+            db.close()
+        await asyncio.sleep(_ONLINE_SCORING_INTERVAL_SECONDS)
+
+
 # Wraps a blocking call with its own wall-clock start/end, so a batch of
 # these can run concurrently in a thread pool while each result still carries
 # an accurate timestamp for its own span (see _run_eval_case below).
@@ -1953,6 +2057,7 @@ def update_scorer(scorer_id: uuid.UUID, scorer: ScorerCreate, db: Session = Depe
     db_scorer.prompt_template = scorer.prompt_template
     db_scorer.choice_scores = scorer.choice_scores
     db_scorer.pass_threshold = scorer.pass_threshold
+    db_scorer.run_online = scorer.run_online
     db.commit()
     db.refresh(db_scorer)
     return db_scorer
@@ -2125,6 +2230,78 @@ def _evaluate_alert_rule(rule: AlertRule, db: Session) -> AlertStatus:
         triggered=bool(triggered),
         sample_size=len(traces),
     )
+
+
+# ---------------------------------------------------------------------------
+# Alert webhook notifications — a background loop that POSTs a JSON payload
+# to any enabled rule's webhook_url when it's triggered, reusing
+# _evaluate_alert_rule above as-is (the exact same computation GET
+# /alerts/status uses). See `lifespan` for how this loop is started/stopped.
+# ---------------------------------------------------------------------------
+_ALERT_NOTIFICATION_INTERVAL_SECONDS = 60
+
+
+def _due_alert_rules(db: Session) -> list["AlertRule"]:
+    return db.query(AlertRule).filter(AlertRule.enabled.is_(True), AlertRule.webhook_url.isnot(None)).all()
+
+
+async def _post_alert_webhook(url: str, payload: dict) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[alert-notifications] webhook POST to {url!r} failed: {e}")
+        return False
+
+
+async def _run_alert_notifications_once(db: Session) -> None:
+    """One poll tick. Each rule gets its own try/except so one bad rule or
+    one dead webhook can't stop the rest. The cooldown (only re-notify once
+    window_minutes has passed since last_notified_at) is what stops a
+    still-triggered rule from re-firing every 60s poll tick."""
+    rules = await asyncio.to_thread(_due_alert_rules, db)
+    for rule in rules:
+        try:
+            status = await asyncio.to_thread(_evaluate_alert_rule, rule, db)
+            if not status.triggered:
+                continue
+
+            now = datetime.now(timezone.utc)
+            cooldown_elapsed = rule.last_notified_at is None or (now - rule.last_notified_at) >= timedelta(minutes=rule.window_minutes)
+            if not cooldown_elapsed:
+                continue
+
+            payload = {
+                "rule_name": rule.name,
+                "metric": rule.metric,
+                "current_value": status.current_value,
+                "threshold": float(rule.threshold),
+                "comparator": rule.comparator,
+                "triggered_at": now.isoformat(),
+            }
+            # Cooldown resets whether or not the POST actually succeeded — a
+            # webhook that's down shouldn't get hammered every 60s either;
+            # the failure is logged inside _post_alert_webhook.
+            await _post_alert_webhook(rule.webhook_url, payload)
+            rule.last_notified_at = now
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"[alert-notifications] failed processing rule {rule.id}: {e}")
+
+
+async def _alert_notification_loop():
+    while True:
+        db = SessionLocal()
+        try:
+            await _run_alert_notifications_once(db)
+        except Exception as e:
+            print(f"[alert-notifications] loop iteration failed: {e}")
+        finally:
+            db.close()
+        await asyncio.sleep(_ALERT_NOTIFICATION_INTERVAL_SECONDS)
 
 
 # GET /alerts/status — every enabled rule's live-computed value against real
