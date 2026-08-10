@@ -3,9 +3,9 @@
     "question": "What is the capital of France?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 0.8,
+    "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 352,
+    "latency_ms": 276,
     "cost": 2.74e-06,
     "error": null
   },
@@ -15,8 +15,8 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 216,
-    "cost": 3.19e-06,
+    "latency_ms": 648,
+    "cost": 2.87e-06,
     "error": null
   },
   {
@@ -25,18 +25,18 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 198,
-    "cost": 3.91e-06,
+    "latency_ms": 128,
+    "cost": 3.75e-06,
     "error": null
   },
   {
     "question": "Who wrote Romeo and Juliet?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 0.95,
+    "faithfulness": 0.8,
     "relevance": 1.0,
-    "latency_ms": 279,
-    "cost": 5.57e-06,
+    "latency_ms": 146,
+    "cost": 7.89e-06,
     "error": null
   },
   {
@@ -45,18 +45,18 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 215,
-    "cost": 5.32e-06,
+    "latency_ms": 178,
+    "cost": 3.08e-06,
     "error": null
   },
   {
     "question": "What is the largest ocean on Earth?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 1.0,
+    "faithfulness": 0.9,
     "relevance": 1.0,
-    "latency_ms": 370,
-    "cost": 1.071e-05,
+    "latency_ms": 185,
+    "cost": 8.710000000000001e-06,
     "error": null
   }
 ]
