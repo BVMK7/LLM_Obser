@@ -2,9 +2,10 @@
 
 /* Design tokens — dark-navy chrome/cards, white page canvas.
    Every component reads colors through these variables (not literal hex).
-   Only --bg-app is white (the page canvas behind/between cards, with the
-   circuit-grid pattern below) — sidebar, topbar, cards, and inputs keep
-   their original dark-navy colors, so they stay untouched by this. */
+   Sidebar, topbar, cards, and inputs keep their fixed dark-navy colors in
+   BOTH platform themes (see .app-shell[data-theme] below) — only --bg-app
+   (the page canvas), --text-on-canvas(-muted), and the circuit-grid colors
+   change with the theme, since only they sit directly on the canvas. */
 :root {
   --bg-app: #ffffff;
   --bg-sidebar: #1b1d24;
@@ -21,6 +22,23 @@
   --brand-success: #5cc180;
   --brand-warning: #e0a44d;
   --brand-danger: #f0847b;
+
+  /* Canvas-only tokens — text sitting directly on --bg-app (not inside a
+     card) and the circuit-grid overlay. Light theme (default) values. */
+  --text-on-canvas: #16161d;
+  --text-on-canvas-muted: #52525b;
+  --grid-line: rgba(75, 85, 99, 0.08);
+  --grid-dot: rgba(55, 65, 81, 0.12);
+}
+
+/* Dark platform theme — flips the canvas dark to match the sidebar/cards.
+   Toggled via ThemeContext.jsx, applied to the .app-shell wrapper. */
+.app-shell[data-theme="dark"] {
+  --bg-app: #0f1115;
+  --text-on-canvas: #f4f5f7;
+  --text-on-canvas-muted: #9a9fab;
+  --grid-line: rgba(255, 255, 255, 0.06);
+  --grid-dot: rgba(255, 255, 255, 0.1);
 }
 
 body {
@@ -48,26 +66,26 @@ body {
       0deg,
       transparent,
       transparent 19px,
-      rgba(75, 85, 99, 0.08) 19px,
-      rgba(75, 85, 99, 0.08) 20px,
+      var(--grid-line) 19px,
+      var(--grid-line) 20px,
       transparent 20px,
       transparent 39px,
-      rgba(75, 85, 99, 0.08) 39px,
-      rgba(75, 85, 99, 0.08) 40px
+      var(--grid-line) 39px,
+      var(--grid-line) 40px
     ),
     repeating-linear-gradient(
       90deg,
       transparent,
       transparent 19px,
-      rgba(75, 85, 99, 0.08) 19px,
-      rgba(75, 85, 99, 0.08) 20px,
+      var(--grid-line) 19px,
+      var(--grid-line) 20px,
       transparent 20px,
       transparent 39px,
-      rgba(75, 85, 99, 0.08) 39px,
-      rgba(75, 85, 99, 0.08) 40px
+      var(--grid-line) 39px,
+      var(--grid-line) 40px
     ),
-    radial-gradient(circle at 20px 20px, rgba(55, 65, 81, 0.12) 2px, transparent 2px),
-    radial-gradient(circle at 40px 40px, rgba(55, 65, 81, 0.12) 2px, transparent 2px);
+    radial-gradient(circle at 20px 20px, var(--grid-dot) 2px, transparent 2px),
+    radial-gradient(circle at 40px 40px, var(--grid-dot) 2px, transparent 2px);
   background-size: 40px 40px, 40px 40px, 40px 40px, 40px 40px;
 }
 
@@ -85,10 +103,10 @@ body {
    shallower than any text nested inside a card), so `main > div > p`
    reliably catches it without touching in-card paragraphs. */
 main h1 {
-  color: #16161d;
+  color: var(--text-on-canvas);
 }
 main > div > p {
-  color: #52525b;
+  color: var(--text-on-canvas-muted);
 }
 
 /* Cards render as a true solid --bg-card (no transparency/blend-through)

@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./AuthContext";
+import { ThemeProvider, usePlatformTheme } from "./ThemeContext";
 import RequireAuth from "./components/RequireAuth";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
@@ -24,6 +25,42 @@ import Alerts from "./pages/Alerts";
 import Review from "./pages/Review";
 import Settings from "./pages/Settings";
 
+// Applies the platform theme's data-theme attribute to the app shell —
+// needs to live inside ThemeProvider to read the current theme via context.
+function AuthenticatedApp() {
+  const { theme } = usePlatformTheme();
+  return (
+    <div className="flex flex-col h-screen app-shell" data-theme={theme}>
+      <Topbar />
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar />
+        <main className="flex-1 overflow-y-auto p-6">
+          <Routes>
+            <Route path="/" element={<Overview />} />
+            <Route path="/traces" element={<Traces />} />
+            <Route path="/traces/:id" element={<TraceDetails />} />
+            <Route path="/performance" element={<Performance />} />
+            <Route path="/cost-usage" element={<CostUsage />} />
+            <Route path="/providers" element={<Providers />} />
+            <Route path="/playground" element={<Playground />} />
+            <Route path="/evaluation" element={<Evaluation />} />
+            <Route path="/datasets" element={<Datasets />} />
+            <Route path="/scorers" element={<Scorers />} />
+            <Route path="/experiments" element={<Experiments />} />
+            <Route path="/experiments/:id" element={<ExperimentDetail />} />
+            <Route path="/models" element={<Navigate to="/providers" replace />} />
+            <Route path="/prompt-library" element={<PromptLibrary />} />
+            <Route path="/alerts" element={<Alerts />} />
+            <Route path="/review" element={<Review />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="/projects/:id/settings" element={<ProjectSettings />} />
+          </Routes>
+        </main>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -36,34 +73,9 @@ export default function App() {
             path="*"
             element={
               <RequireAuth>
-                <div className="flex flex-col h-screen app-shell">
-                  <Topbar />
-                  <div className="flex flex-1 overflow-hidden">
-                    <Sidebar />
-                    <main className="flex-1 overflow-y-auto p-6">
-                      <Routes>
-                        <Route path="/" element={<Overview />} />
-                        <Route path="/traces" element={<Traces />} />
-                        <Route path="/traces/:id" element={<TraceDetails />} />
-                        <Route path="/performance" element={<Performance />} />
-                        <Route path="/cost-usage" element={<CostUsage />} />
-                        <Route path="/providers" element={<Providers />} />
-                        <Route path="/playground" element={<Playground />} />
-                        <Route path="/evaluation" element={<Evaluation />} />
-                        <Route path="/datasets" element={<Datasets />} />
-                        <Route path="/scorers" element={<Scorers />} />
-                        <Route path="/experiments" element={<Experiments />} />
-                        <Route path="/experiments/:id" element={<ExperimentDetail />} />
-                        <Route path="/models" element={<Navigate to="/providers" replace />} />
-                        <Route path="/prompt-library" element={<PromptLibrary />} />
-                        <Route path="/alerts" element={<Alerts />} />
-                        <Route path="/review" element={<Review />} />
-                        <Route path="/settings" element={<Settings />} />
-                        <Route path="/projects/:id/settings" element={<ProjectSettings />} />
-                      </Routes>
-                    </main>
-                  </div>
-                </div>
+                <ThemeProvider>
+                  <AuthenticatedApp />
+                </ThemeProvider>
               </RequireAuth>
             }
           />

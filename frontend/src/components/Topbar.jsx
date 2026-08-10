@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import ProjectSwitcher from "./ProjectSwitcher";
-import { LampIcon } from "./icons";
+import { LampIcon, MoonIcon, SunIcon } from "./icons";
 import { useAuth } from "../AuthContext";
+import { usePlatformTheme } from "../ThemeContext";
 
 // Full-width chrome bar above the page content. Per product decision, the
 // avatar is static decoration; the search box (on the Traces page) and the
@@ -11,6 +12,7 @@ export default function Topbar() {
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user, logout } = useAuth();
+  const { theme, toggleTheme } = usePlatformTheme();
   const isTracesPage = location.pathname === "/traces";
 
   const handleLogout = () => {
@@ -63,6 +65,13 @@ export default function Topbar() {
           Deploy Model
         </button>
         <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--brand-primary)] to-[var(--brand-success)]" />
+        <button
+          onClick={toggleTheme}
+          title={theme === "light" ? "Switch to dark canvas" : "Switch to light canvas"}
+          className="w-8 h-8 flex items-center justify-center border border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+        >
+          {theme === "light" ? <MoonIcon className="w-[16px] h-[16px]" /> : <SunIcon className="w-[16px] h-[16px]" />}
+        </button>
         <button
           onClick={handleLogout}
           title={user ? `Log out (${user.email})` : "Log out"}

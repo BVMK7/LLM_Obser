@@ -140,7 +140,7 @@ export default function Experiments() {
 
       {history.length > 0 && (
         <div className="mb-6">
-          <div className="text-sm font-medium mb-3" style={{ color: "#16161d" }}>Model Comparison</div>
+          <div className="text-sm font-medium mb-3" style={{ color: "var(--text-on-canvas)" }}>Model Comparison</div>
           <div className="flex gap-4 flex-wrap">
             {providersInLatest.map((provider) => (
               <ModelComparisonCard key={provider} provider={provider} experimentsInOrder={history} />
