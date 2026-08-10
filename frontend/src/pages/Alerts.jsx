@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getAlertRules, createAlertRule, deleteAlertRule, getAlertsStatus } from "../api";
+import { getAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, getAlertsStatus } from "../api";
 import Skeleton from "../components/Skeleton";
 
 const METRICS = [
@@ -9,7 +9,7 @@ const METRICS = [
 ];
 
 function draftRule() {
-  return { name: "", metric: "error_rate", comparator: ">", threshold: 10, window_minutes: 60 };
+  return { name: "", metric: "error_rate", comparator: ">", threshold: 10, window_minutes: 60, webhook_url: "" };
 }
 
 function formatValue(metric, value) {
@@ -30,9 +30,12 @@ function AlertsSkeleton() {
 }
 
 // Threshold rules checked against real trace data within a trailing window
-// (see main.py's _evaluate_alert_rule) — there's no email/Slack integration
-// in this app, so "triggered" means "shows up here," not a pushed
-// notification. Recomputed fresh every time this page loads.
+// (see main.py's _evaluate_alert_rule). Status here is recomputed fresh
+// every time this page loads; a rule with a webhook_url set also gets a
+// real notification POSTed by a background loop (main.py's
+// _alert_notification_loop) once per trailing window while it stays
+// triggered — this page doesn't drive that, it's just a live read of the
+// same rules/status.
 export default function Alerts() {
   const [rules, setRules] = useState([]);
   const [statuses, setStatuses] = useState([]);
@@ -58,7 +61,12 @@ export default function Alerts() {
     setCreating(true);
     setError(null);
     try {
-      await createAlertRule({ ...draft, threshold: Number(draft.threshold), window_minutes: Number(draft.window_minutes) });
+      await createAlertRule({
+        ...draft,
+        threshold: Number(draft.threshold),
+        window_minutes: Number(draft.window_minutes),
+        webhook_url: draft.webhook_url.trim() || null,
+      });
       setDraft(draftRule());
       await refresh();
     } catch (err) {
@@ -71,6 +79,28 @@ export default function Alerts() {
   const handleDelete = async (id) => {
     await deleteAlertRule(id);
     await refresh();
+  };
+
+  // Webhook isn't part of the create-form's inline fields for existing
+  // rules (the row is already dense) — reuses the same prompt-based quick
+  // edit pattern as TraceDetails' review note.
+  const handleEditWebhook = async (rule) => {
+    const next = window.prompt("Webhook URL (Discord, Slack, or any endpoint) — leave blank to remove:", rule.webhook_url || "");
+    if (next === null) return; // cancelled
+    try {
+      await updateAlertRule(rule.id, {
+        name: rule.name,
+        metric: rule.metric,
+        comparator: rule.comparator,
+        threshold: rule.threshold,
+        window_minutes: rule.window_minutes,
+        enabled: rule.enabled,
+        webhook_url: next.trim() || null,
+      });
+      await refresh();
+    } catch (err) {
+      setError(err.message);
+    }
   };
 
   if (loading) return <AlertsSkeleton />;
@@ -102,6 +132,7 @@ export default function Alerts() {
                 <th className="pb-2 font-normal">Current Value</th>
                 <th className="pb-2 font-normal">Window</th>
                 <th className="pb-2 font-normal">Status</th>
+                <th className="pb-2 font-normal">Webhook</th>
                 <th className="pb-2 font-normal"></th>
               </tr>
             </thead>
@@ -131,6 +162,19 @@ export default function Alerts() {
                       >
                         {triggered ? "TRIGGERED" : "OK"}
                       </span>
+                    </td>
+                    <td className="py-2.5">
+                      <button
+                        onClick={() => handleEditWebhook(rule)}
+                        title={rule.webhook_url || "No webhook set — click to add one"}
+                        className={`text-xs transition-colors ${
+                          rule.webhook_url
+                            ? "text-[var(--brand-success)] hover:underline"
+                            : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                        }`}
+                      >
+                        {rule.webhook_url ? "Configured" : "Set webhook"}
+                      </button>
                     </td>
                     <td className="py-2.5 text-right">
                       <button
@@ -190,6 +234,12 @@ export default function Alerts() {
             className="w-24 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
           />
           <span className="text-xs text-[var(--text-muted)]">min window</span>
+          <input
+            value={draft.webhook_url}
+            onChange={(e) => setDraft((d) => ({ ...d, webhook_url: e.target.value }))}
+            placeholder="Webhook URL (optional — Discord, Slack, etc.)"
+            className="flex-1 min-w-[220px] bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+          />
           <button
             onClick={handleCreate}
             disabled={creating || !draft.name.trim()}
