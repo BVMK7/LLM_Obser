@@ -19,6 +19,17 @@ This is intentionally simple: every call is a synchronous HTTP request, and
 there's no batching/retry/queueing — fine for a demo or a low-volume agent,
 not yet meant for high-throughput production use (see the platform's README
 for what's still on the roadmap there).
+
+Guardrails — call `client.check_injection(trace_id, text)` on any tool
+result or other untrusted text *before* letting the agent act on it. If the
+returned dict's "flagged" is True, stop and surface "explanation" to
+whoever's watching instead of proceeding — don't feed the text to the agent.
+
+Kill-switch — in an agent loop using `session_id=` on `client.traced(...)`,
+call `client.session_status(session_id)` before each step/tool call. If the
+returned dict's "halted" is True, stop the agent and surface "reason"
+instead of continuing — the thresholds live on the project (admin-set), not
+something this SDK call can raise itself.
 """
 
 import contextvars
@@ -37,6 +48,11 @@ class Client:
 
     def _headers(self):
         return {"X-API-Key": self.api_key, "Content-Type": "application/json"}
+
+    def _get(self, path: str):
+        resp = requests.get(f"{self.base_url}{path}", headers=self._headers(), timeout=30)
+        resp.raise_for_status()
+        return resp.json()
 
     def _post(self, path: str, body: dict):
         resp = requests.post(f"{self.base_url}{path}", json=body, headers=self._headers(), timeout=30)
@@ -59,6 +75,33 @@ class Client:
                 "score_value": score_value,
                 "explanation": explanation,
                 "span_id": span_id,
+            },
+        )
+
+    def session_status(self, session_id: str) -> dict:
+        """Kill-switch check — call this before each step/tool call in an
+        agent loop that's using session_id= on traced(). Returns
+        {"session_id", "step_count", "total_cost", "elapsed_seconds",
+        "halted": bool, "reason": str | None}; if "halted" is True, stop the
+        agent and surface "reason" instead of continuing. Once halted it
+        stays halted (latches server-side) — there's no way to un-halt from
+        here."""
+        return self._get(f"/sessions/{session_id}/status")
+
+    def check_injection(self, trace_id: str, text: str, span_id: str = None, scorer_slug: str = "prompt-injection-guard"):
+        """Synchronous safety gate — call this on any tool result or other
+        untrusted text BEFORE letting the agent act on it. Blocks on the
+        judge call (unlike log_score, which just records a value after the
+        fact). Returns {"flagged": bool, "score": float | None,
+        "explanation": str}; if "flagged" is True, stop and surface
+        "explanation" instead of proceeding."""
+        return self._post(
+            "/guardrails/check",
+            {
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "scorer_slug": scorer_slug,
+                "text": text,
             },
         )
 
