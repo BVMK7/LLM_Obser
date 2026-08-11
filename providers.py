@@ -180,6 +180,12 @@ PRICING = {
     # OpenRouter's ":free" models are genuinely free — not a fallback estimate.
     "google/gemma-4-26b-a4b-it:free": {"input": 0.0, "output": 0.0},
     "google/gemma-4-31b-it:free": {"input": 0.0, "output": 0.0},
+    # Not one of this app's own PROVIDERS (no OpenAI key/call_* function here)
+    # — this entry exists purely so traces tagged with this model string by
+    # an external integration (posted directly to POST /traces, not run
+    # through this app's own providers) still get a real cost instead of a
+    # silent $0. Confirmed 2026-08-10 against platform.openai.com/docs/pricing.
+    "openai/gpt-4o-mini": {"input": 0.15, "output": 0.60},
 }
 
 
@@ -191,3 +197,20 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     if not rates:
         return 0.0
     return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
+
+
+def estimate_cost_from_total_tokens(model: str, total_tokens: int):
+    """Same list-price table as estimate_cost, but for a trace that only has
+    a combined total_tokens count and no input/output split — the case for
+    any trace created directly via POST /traces by an external integration,
+    rather than through this app's own Playground/Evaluation flows (which
+    track input/output tokens separately and call estimate_cost directly).
+    Splits the blended input+output rate evenly across total_tokens as the
+    best available approximation. Returns None (not 0.0) for an unrecognized
+    model — the caller should leave cost untouched rather than store a wrong
+    zero."""
+    rates = PRICING.get(model)
+    if not rates:
+        return None
+    blended_rate = (rates["input"] + rates["output"]) / 2
+    return (total_tokens * blended_rate) / 1_000_000

@@ -27,7 +27,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
-from providers import PROVIDERS, MODEL_CATALOG, estimate_cost
+from providers import PROVIDERS, MODEL_CATALOG, estimate_cost, estimate_cost_from_total_tokens
 
 ProviderName = Literal["gemini", "groq", "openrouter"]
 
@@ -1157,6 +1157,21 @@ def models_catalog():
     return MODEL_CATALOG
 
 
+# A trace created directly via POST/PATCH /traces by an external
+# integration (not through this app's own Playground/Evaluation, which
+# already call estimate_cost() themselves with a precise input/output
+# split) can arrive with model + total_tokens set but no cost — rather than
+# silently showing $0 for real spend, fill it in with the same list-price
+# table Playground/Evaluation use. Only touches cost when the caller left
+# it unset; never overwrites a cost the caller actually provided, and
+# leaves it untouched (not 0.0) for a model this app has no pricing for.
+def _maybe_backfill_trace_cost(db_trace: "Trace") -> None:
+    if db_trace.cost is None and db_trace.model and db_trace.total_tokens:
+        estimated = estimate_cost_from_total_tokens(db_trace.model, db_trace.total_tokens)
+        if estimated is not None:
+            db_trace.cost = estimated
+
+
 # 6. POST /traces — creates a new trace row and returns it.
 @app.post("/traces", response_model=TraceResponse)
 def create_trace(trace: TraceCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
@@ -1164,6 +1179,8 @@ def create_trace(trace: TraceCreate, db: Session = Depends(get_db), project: Pro
     # exclude_unset=True means fields the client didn't send (like started_at)
     # are left out, so the database's own defaults (e.g. now()) apply instead.
     db_trace = Trace(**trace.model_dump(exclude_unset=True), project_id=project.id)
+
+    _maybe_backfill_trace_cost(db_trace)
 
     db.add(db_trace)        # stage the new row
     db.commit()             # save it to the database
@@ -1256,6 +1273,9 @@ def update_trace(trace_id: uuid.UUID, update: TraceUpdate, db: Session = Depends
 
     for field, value in update.model_dump(exclude_unset=True).items():
         setattr(db_trace, field, value)
+
+    _maybe_backfill_trace_cost(db_trace)
+
     db.commit()
     db.refresh(db_trace)
 
