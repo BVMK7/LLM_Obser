@@ -5,7 +5,7 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 318,
+    "latency_ms": 296,
     "cost": 2.74e-06,
     "error": null
   },
@@ -15,8 +15,8 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 210,
-    "cost": 2.87e-06,
+    "latency_ms": 137,
+    "cost": 2.71e-06,
     "error": null
   },
   {
@@ -25,18 +25,18 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 240,
-    "cost": 2.87e-06,
+    "latency_ms": 229,
+    "cost": 3.99e-06,
     "error": null
   },
   {
     "question": "Who wrote Romeo and Juliet?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 0.9,
+    "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 318,
-    "cost": 5.17e-06,
+    "latency_ms": 134,
+    "cost": 3.0100000000000004e-06,
     "error": null
   },
   {
@@ -45,18 +45,18 @@
     "passed": true,
     "faithfulness": 1.0,
     "relevance": 1.0,
-    "latency_ms": 296,
-    "cost": 5.32e-06,
+    "latency_ms": 200,
+    "cost": 6.36e-06,
     "error": null
   },
   {
     "question": "What is the largest ocean on Earth?",
     "provider": "groq",
     "passed": true,
-    "faithfulness": 1.0,
+    "faithfulness": 0.9,
     "relevance": 1.0,
-    "latency_ms": 298,
-    "cost": 8.63e-06,
+    "latency_ms": 253,
+    "cost": 1.023e-05,
     "error": null
   }
 ]
