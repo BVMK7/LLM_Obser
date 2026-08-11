@@ -240,7 +240,10 @@ export const logout = () => request("/auth/logout", { method: "POST", auth: "use
 // session and is scoped to projects they're a member of.
 export const getProjects = () => request("/projects", { auth: "user", errorMessage: "Failed to load projects" });
 export const createProject = (payload) => request("/projects", { method: "POST", body: payload, auth: "user", errorMessage: "Failed to create project" });
-export const renameProject = (id, name) => request(`/projects/${id}`, { method: "PATCH", body: { name }, auth: "user", errorMessage: "Failed to rename project" });
+// `payload` is the full ProjectUpdate body (name + optional kill-switch
+// fields) — the backend uses exclude_unset semantics, so omitted fields
+// are left untouched rather than cleared.
+export const updateProject = (id, payload) => request(`/projects/${id}`, { method: "PATCH", body: payload, auth: "user", errorMessage: "Failed to update project" });
 export const deleteProject = (id) => request(`/projects/${id}`, { method: "DELETE", auth: "user", errorMessage: "Failed to delete project" });
 
 export const createApiKey = (projectId) =>

@@ -4,7 +4,7 @@ import { useAuth } from "../AuthContext";
 import CopyButton from "../components/CopyButton";
 import {
   getProjects,
-  renameProject,
+  updateProject,
   getMembers,
   updateMemberRole,
   removeMember,
@@ -15,6 +15,17 @@ import {
   createApiKey,
   revokeApiKey,
 } from "../api";
+
+// Kill-switch number fields round-trip through text inputs as strings so an
+// empty box unambiguously means "no limit" — `null` on the wire, not 0.
+function killSwitchDraftFrom(project) {
+  return {
+    max_session_steps: project.max_session_steps ?? "",
+    max_session_cost: project.max_session_cost ?? "",
+    max_session_seconds: project.max_session_seconds ?? "",
+    kill_switch_webhook_url: project.kill_switch_webhook_url ?? "",
+  };
+}
 
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
@@ -28,6 +39,9 @@ export default function ProjectSettings() {
   const [notFound, setNotFound] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [nameDraft, setNameDraft] = useState("");
+  const [killSwitchDraft, setKillSwitchDraft] = useState(killSwitchDraftFrom({}));
+  const [killSwitchSaving, setKillSwitchSaving] = useState(false);
+  const [killSwitchSaved, setKillSwitchSaved] = useState(false);
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState([]);
   const [apiKeys, setApiKeys] = useState([]);
@@ -58,6 +72,7 @@ export default function ProjectSettings() {
         }
         setProjectName(project.name);
         setNameDraft(project.name);
+        setKillSwitchDraft(killSwitchDraftFrom(project));
         setMembers(memberList);
 
         const mine = memberList.find((m) => m.user_id === user?.id);
@@ -79,9 +94,29 @@ export default function ProjectSettings() {
   const handleRename = (e) => {
     e.preventDefault();
     if (!nameDraft.trim() || nameDraft === projectName) return;
-    renameProject(id, nameDraft.trim())
+    updateProject(id, { name: nameDraft.trim() })
       .then((updated) => setProjectName(updated.name))
       .catch((err) => setError(err.message));
+  };
+
+  // Empty box -> null ("no limit"); otherwise the number the admin typed.
+  // name is always resent unchanged since ProjectUpdate requires it.
+  const handleKillSwitchSave = (e) => {
+    e.preventDefault();
+    setKillSwitchSaving(true);
+    setKillSwitchSaved(false);
+    setError(null);
+    const toNumberOrNull = (v) => (v === "" ? null : Number(v));
+    updateProject(id, {
+      name: projectName,
+      max_session_steps: toNumberOrNull(killSwitchDraft.max_session_steps),
+      max_session_cost: toNumberOrNull(killSwitchDraft.max_session_cost),
+      max_session_seconds: toNumberOrNull(killSwitchDraft.max_session_seconds),
+      kill_switch_webhook_url: killSwitchDraft.kill_switch_webhook_url.trim() || null,
+    })
+      .then(() => setKillSwitchSaved(true))
+      .catch((err) => setError(err.message))
+      .finally(() => setKillSwitchSaving(false));
   };
 
   const handleInvite = (e) => {
@@ -300,6 +335,63 @@ export default function ProjectSettings() {
                 {newApiKey}
               </div>
             </div>
+          )}
+        </div>
+
+        {/* Kill-Switch Limits */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] p-4">
+          <div className="text-sm font-medium text-[var(--text-primary)] mb-1">Kill-Switch Limits</div>
+          <p className="text-xs text-[var(--text-muted)] mb-3">
+            Automatically stops an agent session that goes over these limits. Leave a field blank for no limit.
+          </p>
+          {!isAdmin ? (
+            <div className="text-xs text-[var(--text-muted)]">Only admins can view or change kill-switch limits.</div>
+          ) : (
+            <form onSubmit={handleKillSwitchSave} className="flex flex-col gap-2">
+              <label className="block text-xs text-[var(--text-muted)]">Max Steps</label>
+              <input
+                type="number"
+                min="1"
+                placeholder="No limit"
+                value={killSwitchDraft.max_session_steps}
+                onChange={(e) => setKillSwitchDraft((d) => ({ ...d, max_session_steps: e.target.value }))}
+                className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+              />
+              <label className="block text-xs text-[var(--text-muted)]">Max Cost ($)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.000001"
+                placeholder="No limit"
+                value={killSwitchDraft.max_session_cost}
+                onChange={(e) => setKillSwitchDraft((d) => ({ ...d, max_session_cost: e.target.value }))}
+                className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+              />
+              <label className="block text-xs text-[var(--text-muted)]">Max Duration (seconds)</label>
+              <input
+                type="number"
+                min="1"
+                placeholder="No limit"
+                value={killSwitchDraft.max_session_seconds}
+                onChange={(e) => setKillSwitchDraft((d) => ({ ...d, max_session_seconds: e.target.value }))}
+                className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+              />
+              <label className="block text-xs text-[var(--text-muted)]">Notification Webhook (optional — Discord, Slack, etc.)</label>
+              <input
+                type="text"
+                placeholder="https://discord.com/api/webhooks/..."
+                value={killSwitchDraft.kill_switch_webhook_url}
+                onChange={(e) => setKillSwitchDraft((d) => ({ ...d, kill_switch_webhook_url: e.target.value }))}
+                className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+              />
+              <button
+                type="submit"
+                disabled={killSwitchSaving}
+                className="w-full bg-[var(--brand-primary)] text-white text-sm font-medium px-3 py-1.5 hover:opacity-90 transition-opacity disabled:opacity-50 mt-1"
+              >
+                {killSwitchSaving ? "Saving..." : killSwitchSaved ? "Saved" : "Save Limits"}
+              </button>
+            </form>
           )}
         </div>
 
