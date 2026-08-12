@@ -210,3 +210,17 @@ export function MoonIcon(props) {
     </IconBase>
   );
 }
+
+// Sidebar nav item for the Agents page — three connected nodes, standing in
+// for multiple agents coordinating (memory/messages/cost all revolve around
+// more than one named agent).
+export function AgentsIcon(props) {
+  return (
+    <IconBase {...props}>
+      <circle cx="12" cy="5" r="2.5" />
+      <circle cx="5" cy="18" r="2.5" />
+      <circle cx="19" cy="18" r="2.5" />
+      <path d="M10.5 7 6.8 15.7M13.5 7l3.7 8.7" />
+    </IconBase>
+  );
+}

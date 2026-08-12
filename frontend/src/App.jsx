@@ -24,6 +24,7 @@ import ExperimentDetail from "./pages/ExperimentDetail";
 import Alerts from "./pages/Alerts";
 import Review from "./pages/Review";
 import Settings from "./pages/Settings";
+import Agents from "./pages/Agents";
 
 // Applies the platform theme's data-theme attribute to the app shell —
 // needs to live inside ThemeProvider to read the current theme via context.
@@ -42,6 +43,7 @@ function AuthenticatedApp() {
             <Route path="/performance" element={<Performance />} />
             <Route path="/cost-usage" element={<CostUsage />} />
             <Route path="/providers" element={<Providers />} />
+            <Route path="/agents" element={<Agents />} />
             <Route path="/playground" element={<Playground />} />
             <Route path="/evaluation" element={<Evaluation />} />
             <Route path="/datasets" element={<Datasets />} />

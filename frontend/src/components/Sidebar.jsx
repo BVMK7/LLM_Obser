@@ -15,6 +15,7 @@ import {
   ReviewIcon,
   SettingsIcon,
   DocumentationIcon,
+  AgentsIcon,
 } from "./icons";
 
 const navSections = [
@@ -33,6 +34,7 @@ const navSections = [
       { to: "/performance", label: "Performance", icon: <PerformanceIcon /> },
       { to: "/cost-usage", label: "Cost & Usage", icon: <CostUsageIcon /> },
       { to: "/providers", label: "Providers & Models", icon: <ProvidersIcon /> },
+      { to: "/agents", label: "Agents", icon: <AgentsIcon /> },
     ],
   },
   {

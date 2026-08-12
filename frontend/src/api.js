@@ -19,7 +19,10 @@ export function setApiKey(key) {
   localStorage.setItem(STORAGE_KEY, key);
 }
 
-function authHeaders() {
+// Exported (not just used internally by request()) so the SSE-based session
+// stream can authenticate its own raw fetch() call — that one can't go
+// through request() because it reads a byte stream instead of res.json().
+export function authHeaders() {
   return { "X-API-Key": getApiKey() };
 }
 
@@ -188,10 +191,22 @@ export async function getPromptVersions(id) {
 // Shared helper for the newer endpoints below — same fetch-wrapper idiom as
 // every function above, just without repeating the method/headers/error text
 // four times per resource. `auth: "user"` swaps in the Bearer session header
-// instead of X-API-Key, for the project-management endpoints.
-async function request(path, { method = "GET", body, errorMessage, auth = "apiKey" } = {}) {
+// instead of X-API-Key, for the project-management endpoints. `params` is an
+// optional plain object of query-string values — skipped (not appended) when
+// a value is null/undefined, so callers can pass an optional filter through
+// unconditionally without building the object conditionally themselves.
+async function request(path, { method = "GET", body, params, errorMessage, auth = "apiKey" } = {}) {
   const authHeadersFn = auth === "user" ? userAuthHeaders : authHeaders;
-  const res = await fetch(`${API_BASE}${path}`, {
+  let url = `${API_BASE}${path}`;
+  if (params) {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== null && value !== undefined) query.set(key, value);
+    }
+    const queryString = query.toString();
+    if (queryString) url += `?${queryString}`;
+  }
+  const res = await fetch(url, {
     method,
     headers: body !== undefined ? { "Content-Type": "application/json", ...authHeadersFn() } : authHeadersFn(),
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -265,3 +280,9 @@ export const revokeInvite = (projectId, inviteId) =>
   request(`/projects/${projectId}/invites/${inviteId}`, { method: "DELETE", auth: "user", errorMessage: "Failed to revoke invite" });
 export const acceptInvite = (token) =>
   request("/invites/accept", { method: "POST", body: { token }, auth: "user", errorMessage: "Failed to accept invite" });
+
+// AgentOps — agents auto-register themselves (via agent_name on a trace, or
+// the SDK's memory/messaging calls), so there's no createAgent here.
+export const getAgents = () => request("/agents", { errorMessage: "Failed to load agents" });
+export const getAgentCosts = (windowMinutes) =>
+  request("/agents/costs", { params: { window_minutes: windowMinutes }, errorMessage: "Failed to load agent costs" });
