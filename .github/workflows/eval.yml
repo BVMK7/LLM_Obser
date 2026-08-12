@@ -72,7 +72,8 @@ jobs:
                    add_review_and_span_hierarchy.sql add_session_and_span_scores.sql \
                    add_online_scoring_and_alert_notifications.sql \
                    create_projects_and_api_keys.sql create_users_and_project_members.sql \
-                   seed_prompt_injection_guard_scorer.sql add_kill_switch.sql; do
+                   seed_prompt_injection_guard_scorer.sql add_kill_switch.sql \
+                   add_agentops_phase1.sql; do
             PGPASSWORD=llm_observability psql -h localhost -p 5433 -U llm_observability -d llm_observability -f "$f"
           done
 
@@ -83,6 +84,14 @@ jobs:
             curl -sf http://localhost:8010/providers/status && break
             sleep 1
           done
+
+      # Real, assert-based tests (unlike the eval gate below, which checks
+      # LLM-output quality/regressions, not code correctness) — a failing
+      # test here fails the build, no opt-out.
+      - name: Run pytest
+        run: pytest tests/ -v
+        env:
+          BACKEND_URL: http://localhost:8010
 
       - name: Run eval gate (PR)
         if: github.event_name == 'pull_request'

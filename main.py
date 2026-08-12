@@ -13,16 +13,17 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 import bcrypt
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, Header, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, exists, func
+from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, exists, func, or_
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
@@ -264,6 +265,10 @@ class Trace(Base):
     # NULL for a standalone trace. Not a foreign key: sessions aren't a table,
     # just a shared UUID the caller mints and reuses across traces.
     session_id = Column(UUID(as_uuid=True), index=True)
+    # Which registered Agent produced this trace — NULL for traces that never
+    # passed agent_name (see TraceCreate.agent_name / _get_or_create_agent).
+    # Existing callers/integrations are unaffected either way.
+    agent_id = Column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), index=True)
 
     # Lets us access trace.spans / trace.scores in Python; SQLAlchemy loads
     # them with a second query the first time they're accessed.
@@ -467,6 +472,65 @@ class SessionHalt(Base):
     halted_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
 
 
+# ---------------------------------------------------------------------------
+# AgentOps Phase 1 — Agent identity, shared memory, and agent-to-agent
+# messaging. See _get_or_create_agent (near Scorer/_slugify below) for why
+# Agent registration is find-or-create rather than Scorer's always-insert
+# pattern: the same agent name used across many calls must resolve to the
+# same row every time, not mint a new one.
+# ---------------------------------------------------------------------------
+class Agent(Base):
+    __tablename__ = "agents"
+    __table_args__ = (UniqueConstraint("project_id", "slug", name="uq_agents_project_slug"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    description = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+
+
+# Shared agent memory — one table, `scope` distinguishes short-term
+# (session/TTL-scoped, expires_at set) from long-term (persistent,
+# expires_at NULL). No DB-level UNIQUE on the logical key (project_id,
+# agent_id, session_id, scope, key): agent_id/session_id are both nullable,
+# and Postgres treats NULL as distinct-from-itself in a UNIQUE constraint,
+# so upsert lookups use explicit NULL-safe filtering in Python instead (see
+# _memory_lookup_query below) rather than relying on ON CONFLICT.
+class AgentMemory(Base):
+    __tablename__ = "agent_memory"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    agent_id = Column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"))
+    session_id = Column(UUID(as_uuid=True))
+    scope = Column(String, nullable=False)  # "short_term" | "long_term"
+    key = Column(String, nullable=False)
+    value = Column(JSONB, nullable=False)
+    expires_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default="now()", onupdate=func.now())
+
+
+# Agent-to-agent messaging — a durable inbox table, not a queue (Redis
+# Streams is Phase 2's answer for async trace ingestion specifically;
+# pulling in new infra here would be a bigger change than this needs).
+# to_agent_id NULL means broadcast — visible in every agent's inbox in the
+# same project.
+class AgentMessage(Base):
+    __tablename__ = "agent_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    from_agent_id = Column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False)
+    to_agent_id = Column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"))
+    session_id = Column(UUID(as_uuid=True))
+    content = Column(JSONB, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    read_at = Column(DateTime(timezone=True))
+
+
 # 4. Pydantic schemas — these define what JSON the API accepts and returns.
 # TraceBase holds the fields shared by TraceCreate and TraceResponse, MINUS
 # started_at — that one field flips from optional (caller may omit it, the
@@ -487,6 +551,10 @@ class TraceBase(BaseModel):
 # TraceCreate = the shape of the request body sent to POST /traces.
 class TraceCreate(TraceBase):
     started_at: Optional[datetime] = None
+    # Write-only convenience field, not a Trace column itself — create_trace
+    # resolves this to agent_id via _get_or_create_agent. Deliberately NOT on
+    # TraceBase, so it never appears as a settable field on TraceResponse.
+    agent_name: Optional[str] = None
 
 
 # TraceResponse = the shape of the JSON we send back (includes DB-generated fields).
@@ -496,6 +564,8 @@ class TraceResponse(TraceBase):
     # Computed, not a DB column — see _compute_trace_status() below.
     status: Literal["success", "error", "pending"]
     flagged_for_review: bool = False
+    # Read-only — resolved from agent_name at creation time (see TraceCreate).
+    agent_id: Optional[uuid.UUID] = None
     review_note: Optional[str] = None
 
     # Lets Pydantic read values directly off the SQLAlchemy Trace object.
@@ -1246,13 +1316,42 @@ def _maybe_backfill_trace_cost(db_trace: "Trace") -> None:
             db_trace.cost = estimated
 
 
+# Finds the Agent matching (project_id, name) or creates it — unlike
+# create_scorer's slug pattern (always inserts a new row, disambiguating
+# collisions with a numeric suffix), the same agent name used across many
+# calls must resolve to the SAME row every time. _slugify is defined near
+# Scorer below; referencing it here works regardless of textual order since
+# Python only looks it up when this function actually runs.
+def _get_or_create_agent(db: Session, project_id, name: str) -> "Agent":
+    slug = _slugify(name)
+    agent = db.query(Agent).filter(Agent.project_id == project_id, Agent.slug == slug).first()
+    if agent is not None:
+        return agent
+    agent = Agent(project_id=project_id, name=name, slug=slug)
+    db.add(agent)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two concurrent first-uses of the same new agent name — re-read
+        # whichever insert actually landed rather than erroring.
+        db.rollback()
+        agent = db.query(Agent).filter(Agent.project_id == project_id, Agent.slug == slug).first()
+    else:
+        db.refresh(agent)
+    return agent
+
+
 # 6. POST /traces — creates a new trace row and returns it.
 @app.post("/traces", response_model=TraceResponse)
 def create_trace(trace: TraceCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     # Build a SQLAlchemy model instance from the incoming JSON.
     # exclude_unset=True means fields the client didn't send (like started_at)
     # are left out, so the database's own defaults (e.g. now()) apply instead.
-    db_trace = Trace(**trace.model_dump(exclude_unset=True), project_id=project.id)
+    data = trace.model_dump(exclude_unset=True)
+    agent_name = data.pop("agent_name", None)
+    db_trace = Trace(**data, project_id=project.id)
+    if agent_name:
+        db_trace.agent_id = _get_or_create_agent(db, project.id, agent_name).id
 
     _maybe_backfill_trace_cost(db_trace)
 
@@ -1466,14 +1565,10 @@ class SessionStatus(BaseModel):
     reason: Optional[str] = None
 
 
-# GET /sessions/{session_id}/status — the agent/SDK's kill-switch check
-# (see Client.session_status in sdk/llmobs). Project-scoped via the same
-# X-API-Key dependency every other data-plane endpoint uses — this is
-# called by the agent itself, not a logged-in human. Thresholds only ever
-# come from the Project row (admin-set via PATCH /projects/{id}); a caller
-# here has no way to raise its own limit.
-@app.get("/sessions/{session_id}/status", response_model=SessionStatus)
-def session_status(session_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+# Pulled out of session_status (below) so GET /sessions/{id}/status and the
+# new SSE GET /sessions/{id}/stream share one implementation — pure
+# function, no behavior change from before the refactor.
+def _compute_session_status(db: Session, project: Project, session_id: uuid.UUID) -> SessionStatus:
     traces = db.query(Trace).filter(Trace.project_id == project.id, Trace.session_id == session_id).all()
     trace_ids = [t.id for t in traces]
     step_count = db.query(Span).filter(Span.trace_id.in_(trace_ids)).count() if trace_ids else 0
@@ -1535,6 +1630,301 @@ def session_status(session_id: uuid.UUID, db: Session = Depends(get_db), project
         session_id=session_id, step_count=step_count, total_cost=total_cost,
         elapsed_seconds=elapsed_seconds, halted=True, reason=reason_text,
     )
+
+
+# GET /sessions/{session_id}/status — the agent/SDK's kill-switch check
+# (see Client.session_status in sdk/llmobs). Project-scoped via the same
+# X-API-Key dependency every other data-plane endpoint uses — this is
+# called by the agent itself, not a logged-in human. Thresholds only ever
+# come from the Project row (admin-set via PATCH /projects/{id}); a caller
+# here has no way to raise its own limit.
+@app.get("/sessions/{session_id}/status", response_model=SessionStatus)
+def session_status(session_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    return _compute_session_status(db, project, session_id)
+
+
+_SESSION_STREAM_POLL_SECONDS = 2
+_SESSION_STREAM_MAX_SECONDS = 600  # ~10 minutes — caps an abandoned browser tab's connection
+
+
+# GET /sessions/{session_id}/stream — live status via Server-Sent Events,
+# for a dashboard watching a session in real time. Auth stays the same
+# X-API-Key header dependency as every other data-plane route (unlike a
+# browser EventSource, a fetch()-based SSE client CAN send custom headers,
+# so nothing here needs a query-string API key). Polls the same
+# _compute_session_status a plain GET would, via asyncio.to_thread so the
+# blocking DB query never stalls the event loop (same pattern as the
+# _online_scoring_loop/_alert_notification_loop background tasks) — only
+# emits a fresh `data:` frame when the payload actually changed, a
+# `: keep-alive` comment otherwise, and stops once halted or after
+# _SESSION_STREAM_MAX_SECONDS, whichever comes first.
+@app.get("/sessions/{session_id}/stream")
+async def session_status_stream(session_id: uuid.UUID, request: Request, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    async def event_generator():
+        last_payload = None
+        elapsed = 0
+        while elapsed < _SESSION_STREAM_MAX_SECONDS:
+            if await request.is_disconnected():
+                break
+            status = await asyncio.to_thread(_compute_session_status, db, project, session_id)
+            payload = status.model_dump_json()
+            if payload != last_payload:
+                yield f"data: {payload}\n\n"
+                last_payload = payload
+            else:
+                yield ": keep-alive\n\n"
+            if status.halted:
+                break
+            await asyncio.sleep(_SESSION_STREAM_POLL_SECONDS)
+            elapsed += _SESSION_STREAM_POLL_SECONDS
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# AgentOps Phase 1 — agents, shared memory, messaging, per-agent cost
+# dashboard. All project-scoped via the same X-API-Key dependency as
+# /guardrails/check and /sessions/{id}/status: these are agent/SDK-facing
+# data-plane operations, not project management (require_membership).
+# ---------------------------------------------------------------------------
+class AgentResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    slug: str
+    description: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+@app.get("/agents", response_model=list[AgentResponse])
+def list_agents(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    return db.query(Agent).filter(Agent.project_id == project.id).order_by(Agent.name.asc()).all()
+
+
+# --- Shared memory (short-term + long-term) ---
+
+class MemoryWrite(BaseModel):
+    agent_name: str
+    scope: Literal["short_term", "long_term"]
+    key: str
+    value: Any
+    session_id: Optional[uuid.UUID] = None
+    ttl_seconds: Optional[int] = None  # only meaningful when scope="short_term"
+
+
+class MemoryEntry(BaseModel):
+    agent_id: Optional[uuid.UUID] = None
+    session_id: Optional[uuid.UUID] = None
+    scope: str
+    key: str
+    value: Any
+    expires_at: Optional[datetime] = None
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# NULL-safe filter — `.is_(None)` vs `==` is how SQLAlchemy expresses "match
+# this NULL"/"match this value" the way the migration's COALESCE-based
+# unique index treats NULL agent_id/session_id as a real, matchable value
+# rather than "anything."
+def _memory_lookup(db: Session, project_id, agent_id, session_id, scope: str, key: str) -> Optional["AgentMemory"]:
+    q = db.query(AgentMemory).filter(AgentMemory.project_id == project_id, AgentMemory.scope == scope, AgentMemory.key == key)
+    q = q.filter(AgentMemory.agent_id == agent_id) if agent_id is not None else q.filter(AgentMemory.agent_id.is_(None))
+    q = q.filter(AgentMemory.session_id == session_id) if session_id is not None else q.filter(AgentMemory.session_id.is_(None))
+    return q.first()
+
+
+@app.post("/agents/memory", response_model=MemoryEntry)
+def write_memory(body: MemoryWrite, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    agent = _get_or_create_agent(db, project.id, body.agent_name)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=body.ttl_seconds)
+        if body.scope == "short_term" and body.ttl_seconds is not None
+        else None
+    )
+
+    entry = _memory_lookup(db, project.id, agent.id, body.session_id, body.scope, body.key)
+    if entry is not None:
+        entry.value = body.value
+        entry.expires_at = expires_at
+    else:
+        entry = AgentMemory(
+            project_id=project.id, agent_id=agent.id, session_id=body.session_id,
+            scope=body.scope, key=body.key, value=body.value, expires_at=expires_at,
+        )
+        db.add(entry)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two concurrent first-writes of the same new key raced — the
+        # migration's COALESCE unique index is what makes this a real
+        # collision; re-read whichever insert actually landed.
+        db.rollback()
+        entry = _memory_lookup(db, project.id, agent.id, body.session_id, body.scope, body.key)
+    else:
+        db.refresh(entry)
+    return entry
+
+
+@app.get("/agents/memory", response_model=list[MemoryEntry])
+def read_memory(
+    agent_name: str,
+    scope: Optional[Literal["short_term", "long_term"]] = None,
+    session_id: Optional[uuid.UUID] = None,
+    db: Session = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    agent = db.query(Agent).filter(Agent.project_id == project.id, Agent.slug == _slugify(agent_name)).first()
+    if agent is None:
+        return []
+    now = datetime.now(timezone.utc)
+    q = db.query(AgentMemory).filter(
+        AgentMemory.project_id == project.id,
+        AgentMemory.agent_id == agent.id,
+        or_(AgentMemory.expires_at.is_(None), AgentMemory.expires_at > now),
+    )
+    if scope is not None:
+        q = q.filter(AgentMemory.scope == scope)
+    if session_id is not None:
+        q = q.filter(AgentMemory.session_id == session_id)
+    return q.order_by(AgentMemory.updated_at.desc()).all()
+
+
+@app.delete("/agents/memory")
+def delete_memory(
+    agent_name: str,
+    scope: Literal["short_term", "long_term"],
+    key: str,
+    session_id: Optional[uuid.UUID] = None,
+    db: Session = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    agent = db.query(Agent).filter(Agent.project_id == project.id, Agent.slug == _slugify(agent_name)).first()
+    if agent is not None:
+        entry = _memory_lookup(db, project.id, agent.id, session_id, scope, key)
+        if entry is not None:
+            db.delete(entry)
+            db.commit()
+    return {"ok": True}
+
+
+# --- Agent-to-agent messaging ---
+
+class MessageSend(BaseModel):
+    from_agent: str
+    to_agent: Optional[str] = None  # omitted/None = broadcast to every agent in the project
+    content: Any
+    session_id: Optional[uuid.UUID] = None
+
+
+class MessageResponse(BaseModel):
+    id: uuid.UUID
+    from_agent_id: uuid.UUID
+    to_agent_id: Optional[uuid.UUID] = None
+    session_id: Optional[uuid.UUID] = None
+    content: Any
+    created_at: datetime
+    read_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+@app.post("/agents/messages", response_model=MessageResponse)
+def send_message(body: MessageSend, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    from_agent = _get_or_create_agent(db, project.id, body.from_agent)
+    to_agent_id = _get_or_create_agent(db, project.id, body.to_agent).id if body.to_agent else None
+
+    message = AgentMessage(
+        project_id=project.id, from_agent_id=from_agent.id, to_agent_id=to_agent_id,
+        session_id=body.session_id, content=body.content,
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+@app.get("/agents/messages", response_model=list[MessageResponse])
+def get_messages(
+    agent_name: str,
+    unread_only: bool = True,
+    db: Session = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    agent = db.query(Agent).filter(Agent.project_id == project.id, Agent.slug == _slugify(agent_name)).first()
+    if agent is None:
+        return []
+    q = db.query(AgentMessage).filter(
+        AgentMessage.project_id == project.id,
+        or_(AgentMessage.to_agent_id == agent.id, AgentMessage.to_agent_id.is_(None)),
+    )
+    if unread_only:
+        q = q.filter(AgentMessage.read_at.is_(None))
+    return q.order_by(AgentMessage.created_at.asc()).all()
+
+
+class MessageReadUpdate(BaseModel):
+    read: bool = True
+
+
+@app.patch("/agents/messages/{message_id}", response_model=MessageResponse)
+def mark_message_read(message_id: uuid.UUID, body: MessageReadUpdate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    message = db.get(AgentMessage, message_id)
+    if message is None or message.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Message not found")
+    message.read_at = datetime.now(timezone.utc) if body.read else None
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+# --- Per-agent cost dashboard ---
+
+class AgentCostSummary(BaseModel):
+    agent_id: Optional[uuid.UUID] = None
+    agent_name: str
+    trace_count: int
+    total_cost: float
+    total_tokens: int
+    avg_latency_ms: Optional[float] = None
+
+
+# Python-side aggregation, matching _evaluate_alert_rule/analyze_experiment's
+# existing style elsewhere in this file, rather than a raw SQL GROUP BY —
+# fine at this app's real data volumes (hundreds to low thousands of traces).
+@app.get("/agents/costs", response_model=list[AgentCostSummary])
+def agent_costs(window_minutes: Optional[int] = None, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    query = db.query(Trace).filter(Trace.project_id == project.id)
+    if window_minutes is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+        query = query.filter(Trace.started_at >= cutoff)
+    traces = query.all()
+
+    agents_by_id = {a.id: a for a in db.query(Agent).filter(Agent.project_id == project.id).all()}
+    buckets: dict = {}
+    for t in traces:
+        bucket = buckets.setdefault(t.agent_id, {"trace_count": 0, "total_cost": 0.0, "total_tokens": 0, "durations": []})
+        bucket["trace_count"] += 1
+        bucket["total_cost"] += float(t.cost or 0)
+        bucket["total_tokens"] += t.total_tokens or 0
+        if t.ended_at is not None:
+            bucket["durations"].append((t.ended_at - t.started_at).total_seconds() * 1000)
+
+    results = [
+        AgentCostSummary(
+            agent_id=agent_id,
+            agent_name=agents_by_id[agent_id].name if agent_id else "Unattributed",
+            trace_count=b["trace_count"],
+            total_cost=b["total_cost"],
+            total_tokens=b["total_tokens"],
+            avg_latency_ms=(sum(b["durations"]) / len(b["durations"])) if b["durations"] else None,
+        )
+        for agent_id, b in buckets.items()
+    ]
+    results.sort(key=lambda r: r.total_cost, reverse=True)
+    return results
 
 
 # Helper for POST /spans below: turns a raw error message into a short,

@@ -11,3 +11,4 @@ google-genai
 openai
 streamlit
 pandas
+pytest

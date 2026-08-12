@@ -30,6 +30,14 @@ call `client.session_status(session_id)` before each step/tool call. If the
 returned dict's "halted" is True, stop the agent and surface "reason"
 instead of continuing — the thresholds live on the project (admin-set), not
 something this SDK call can raise itself.
+
+Agent memory & messaging — pass `agent_name=` to `client.traced(...)` to
+attribute a trace to a named agent (auto-registered on first use; the same
+name always resolves to the same agent). `client.remember`/`recall`/
+`forget` are a simple key-value store, scoped short-term (with a TTL) or
+long-term, optionally to one `session_id`. `client.send_message`/
+`get_messages` are a durable inbox between agents in the same project
+(`to_agent=None` broadcasts to every agent).
 """
 
 import contextvars
@@ -49,8 +57,8 @@ class Client:
     def _headers(self):
         return {"X-API-Key": self.api_key, "Content-Type": "application/json"}
 
-    def _get(self, path: str):
-        resp = requests.get(f"{self.base_url}{path}", headers=self._headers(), timeout=30)
+    def _get(self, path: str, params: dict = None):
+        resp = requests.get(f"{self.base_url}{path}", params=params, headers=self._headers(), timeout=30)
         resp.raise_for_status()
         return resp.json()
 
@@ -61,6 +69,11 @@ class Client:
 
     def _patch(self, path: str, body: dict):
         resp = requests.patch(f"{self.base_url}{path}", json=body, headers=self._headers(), timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _delete(self, path: str, params: dict = None):
+        resp = requests.delete(f"{self.base_url}{path}", params=params, headers=self._headers(), timeout=30)
         resp.raise_for_status()
         return resp.json()
 
@@ -105,21 +118,89 @@ class Client:
             },
         )
 
-    def traced(self, name: str, session_id: str = None):
+    def list_agents(self) -> list:
+        """Every agent registered in this project so far (auto-registered
+        via agent_name on traced()/remember()/send_message())."""
+        return self._get("/agents")
+
+    def remember(self, agent_name: str, key: str, value, scope: str = "short_term", session_id: str = None, ttl_seconds: int = None):
+        """Writes (or updates in place) one key in an agent's shared memory.
+        `scope="short_term"` + `ttl_seconds` expires the entry automatically;
+        `scope="long_term"` persists it. Scope to one conversation with
+        `session_id`, or omit it for memory that persists across sessions."""
+        return self._post(
+            "/agents/memory",
+            {
+                "agent_name": agent_name,
+                "scope": scope,
+                "key": key,
+                "value": value,
+                "session_id": session_id,
+                "ttl_seconds": ttl_seconds,
+            },
+        )
+
+    def recall(self, agent_name: str, scope: str = None, session_id: str = None) -> list:
+        """Reads back an agent's memory entries (already-expired short_term
+        entries are excluded server-side). Filter by scope/session_id, or
+        omit both for everything still live."""
+        params = {"agent_name": agent_name}
+        if scope is not None:
+            params["scope"] = scope
+        if session_id is not None:
+            params["session_id"] = session_id
+        return self._get("/agents/memory", params)
+
+    def forget(self, agent_name: str, scope: str, key: str, session_id: str = None):
+        """Deletes one memory entry. No-op (not an error) if it never
+        existed or already expired."""
+        params = {"agent_name": agent_name, "scope": scope, "key": key}
+        if session_id is not None:
+            params["session_id"] = session_id
+        return self._delete("/agents/memory", params)
+
+    def send_message(self, from_agent: str, to_agent: str = None, content=None, session_id: str = None):
+        """Sends a message into another agent's inbox (both agents are
+        auto-registered if new). `to_agent=None` broadcasts to every agent
+        in the project."""
+        return self._post(
+            "/agents/messages",
+            {"from_agent": from_agent, "to_agent": to_agent, "content": content, "session_id": session_id},
+        )
+
+    def get_messages(self, agent_name: str, unread_only: bool = True) -> list:
+        """Reads an agent's inbox — unread only by default. Pair with
+        mark_message_read() once a message has been handled."""
+        return self._get("/agents/messages", {"agent_name": agent_name, "unread_only": unread_only})
+
+    def mark_message_read(self, message_id: str):
+        return self._patch(f"/agents/messages/{message_id}", {"read": True})
+
+    def agent_costs(self, window_minutes: int = None) -> list:
+        """Per-agent cost/token/latency totals, sorted highest-cost first,
+        with an "Unattributed" bucket for traces that never set agent_name.
+        Omit window_minutes for all-time totals."""
+        params = {"window_minutes": window_minutes} if window_minutes is not None else None
+        return self._get("/agents/costs", params)
+
+    def traced(self, name: str, session_id: str = None, agent_name: str = None):
         """Use as a decorator (`@client.traced("step")`) or a context manager
         (`with client.traced("step"):`). Returns a _TracedBlock — see below.
 
         `session_id` groups this trace with others from the same multi-turn
-        conversation; only meaningful on the outermost (trace-creating) call
-        — ignored when this block ends up nested under an existing trace."""
-        return _TracedBlock(self, name, session_id)
+        conversation; `agent_name` attributes it to a named agent (see the
+        module docstring). Both are only meaningful on the outermost
+        (trace-creating) call — ignored when this block ends up nested under
+        an existing trace."""
+        return _TracedBlock(self, name, session_id, agent_name)
 
 
 class _TracedBlock:
-    def __init__(self, client: Client, name: str, session_id: str = None):
+    def __init__(self, client: Client, name: str, session_id: str = None, agent_name: str = None):
         self.client = client
         self.name = name
         self.session_id = session_id
+        self.agent_name = agent_name
         self._input = None
         self._output = None
 
@@ -162,6 +243,7 @@ class _TracedBlock:
                         "input": self._input,
                         "started_at": self.started_at.isoformat(),
                         "session_id": self.session_id,
+                        "agent_name": self.agent_name,
                     },
                 )
                 self.trace_id = trace["id"]
