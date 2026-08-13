@@ -85,6 +85,14 @@ class Project(Base):
     # crosses one of the thresholds above (see GET /sessions/{id}/status).
     # NULL means no notification — the halt still takes effect either way.
     kill_switch_webhook_url = Column(Text)
+    # Phase 3 incidents — see Incident/IncidentSignal above.
+    # incident_webhook_url: notified once when a NEW incident opens (not on
+    # every signal attach, and not on auto-resolve). incident_automation_
+    # enabled: when true, incidents auto-acknowledge on open and auto-
+    # resolve once every attached signal individually clears — bookkeeping
+    # only, never anything that changes what an agent is allowed to do.
+    incident_webhook_url = Column(Text)
+    incident_automation_enabled = Column(Boolean, nullable=False, server_default="false")
 
 
 # An ApiKey authenticates a request as belonging to one Project. Only the
@@ -476,6 +484,10 @@ class AlertRule(Base):
     # window_minutes, not once per 60s poll tick — internal only, never
     # exposed on AlertRuleCreate/AlertRuleResponse.
     last_notified_at = Column(DateTime(timezone=True))
+    # Separate cooldown from last_notified_at above — a rule with no
+    # webhook_url still needs incident correlation, so this can't be gated
+    # behind whether a webhook happens to be configured.
+    last_incident_signal_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
 
 
@@ -497,6 +509,50 @@ class PolicyRule(Base):
     rule_type = Column(String, nullable=False)  # "blocked_model" | "max_cost_per_call" | "blocked_tool"
     config = Column(JSONB, nullable=False)
     enabled = Column(Boolean, nullable=False, server_default="true")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+
+
+# ---------------------------------------------------------------------------
+# AgentOps Phase 3 — correlates AlertRule triggers, trace_flags, and
+# kill-switch SessionHalts into one incident per (project, category) at a
+# time, instead of three disconnected systems. See _attach_incident_signal
+# below for the correlation logic, and docs/superpowers/specs/
+# 2026-08-13-aiops-incidents-design.md for the full design.
+# ---------------------------------------------------------------------------
+class Incident(Base):
+    __tablename__ = "incidents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    category = Column(String, nullable=False)   # "cost" | "reliability" | "performance" | "safety"
+    status = Column(String, nullable=False, server_default="open")  # "open" | "acknowledged" | "resolved"
+    severity = Column(String, nullable=False, server_default="medium")  # "low" | "medium" | "high"
+    opened_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    acknowledged_at = Column(DateTime(timezone=True))
+    resolved_at = Column(DateTime(timezone=True))
+    resolved_note = Column(Text)
+    # LLM-generated advisory guidance — recovery_suggestion is a prose
+    # rendering, recovery_suggestion_json the structured form a UI can
+    # render as a checklist. Both NULL until the background loop's recovery
+    # pass first runs for this incident (see _run_incident_recovery_once).
+    recovery_suggestion = Column(Text)
+    recovery_suggestion_json = Column(JSONB)
+    recovery_generated_at = Column(DateTime(timezone=True))
+
+
+class IncidentSignal(Base):
+    __tablename__ = "incident_signals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    incident_id = Column(UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    source_type = Column(String, nullable=False)  # "alert_rule" | "trace_flag" | "kill_switch"
+    source_id = Column(UUID(as_uuid=True), nullable=False)
+    reason = Column(Text, nullable=False)
+    # Unique per signal event — see _incident_signal_fingerprint. Prevents
+    # a race (two overlapping loop ticks, a retried request) from double-
+    # inserting the same signal; caught as IntegrityError, same pattern
+    # _get_or_create_agent already uses for exactly this kind of race.
+    fingerprint = Column(String, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
 
 
@@ -906,6 +962,8 @@ class ProjectResponse(BaseModel):
     max_session_cost: Optional[float] = None
     max_session_seconds: Optional[int] = None
     kill_switch_webhook_url: Optional[str] = None
+    incident_webhook_url: Optional[str] = None
+    incident_automation_enabled: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1157,6 +1215,8 @@ class ProjectUpdate(BaseModel):
     max_session_cost: Optional[float] = None
     max_session_seconds: Optional[int] = None
     kill_switch_webhook_url: Optional[str] = None
+    incident_webhook_url: Optional[str] = None
+    incident_automation_enabled: Optional[bool] = None
 
 
 # PATCH /projects/{project_id} — rename and/or set kill-switch thresholds.
@@ -2787,6 +2847,43 @@ def check_policy(req: PolicyCheckRequest, db: Session = Depends(get_db), project
             print(f"[policy-engine] failed to evaluate policy {rule.id}: {e}")
 
     return PolicyCheckResponse(allowed=len(violations) == 0, violations=violations)
+
+
+# ---------------------------------------------------------------------------
+# Incidents (Phase 3) — read/lifecycle API. No POST: incidents are always
+# system-correlated (see _attach_incident_signal), never manually created —
+# manual human review is already trace_flags' job.
+# ---------------------------------------------------------------------------
+class IncidentSignalResponse(BaseModel):
+    id: uuid.UUID
+    source_type: str
+    source_id: uuid.UUID
+    reason: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IncidentResponse(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    category: str
+    status: str
+    severity: str
+    opened_at: datetime
+    acknowledged_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+    resolved_note: Optional[str] = None
+    recovery_suggestion: Optional[str] = None
+    recovery_suggestion_json: Optional[dict] = None
+    signals: list[IncidentSignalResponse] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class IncidentUpdate(BaseModel):
+    status: Literal["acknowledged", "resolved"]
+    resolved_note: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
