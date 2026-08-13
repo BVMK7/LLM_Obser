@@ -556,6 +556,97 @@ class IncidentSignal(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
 
 
+# Assigned once, when a signal opens a NEW incident — an incident's
+# category never changes afterward even if a later signal of a different
+# flavor attaches to it. Heuristic, not a hard science: this is what lets
+# an unrelated cost spike and a prompt-injection trip at the same time
+# become two separate incidents instead of one confusing merged one.
+_FLAG_SOURCE_CATEGORY = {"guardrail": "safety", "anomaly": "reliability", "manual": "reliability"}
+_ALERT_METRIC_CATEGORY = {"avg_cost_per_request": "cost", "error_rate": "reliability", "p95_latency_ms": "performance"}
+_SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _incident_signal_fingerprint(source_type: str, source_id, now: Optional[datetime] = None) -> str:
+    """Deterministic per-signal-event identity, for the unique index that
+    stops a race (two overlapping loop ticks, a retried request) from
+    double-inserting the same signal. trace_flag/kill_switch signals are
+    1:1 with an already-unique row id; alert_rule signals are minute-
+    bucketed since the SAME rule legitimately produces a new signal every
+    cooldown period, and only same-minute duplicates should be treated as
+    "the same event"."""
+    if source_type == "alert_rule":
+        bucket = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M")
+        return f"alert_rule:{source_id}:{bucket}"
+    return f"{source_type}:{source_id}"
+
+
+def _format_discord_incident_payload(payload: dict) -> dict:
+    lines = [
+        f"**New incident opened: {payload['project_name']}**",
+        f"Category: `{payload['category']}`  Severity: `{payload['severity']}`",
+        f"Reason: {payload['reason']}",
+        f"Opened at: {payload['opened_at']}",
+    ]
+    return {"content": "\n".join(lines)}
+
+
+def _send_incident_webhook(url: str, payload: dict) -> bool:
+    body = _format_discord_incident_payload(payload) if _is_discord_webhook(url) else payload
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(url, json=body)
+            resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[incidents] webhook POST to {url!r} failed: {e}")
+        return False
+
+
+def _attach_incident_signal(db: Session, project_id, category: str, source_type: str, source_id, severity: str, reason: str) -> Optional["IncidentSignal"]:
+    """The one function every signal source calls. Finds the project's
+    current non-resolved incident for this category and attaches a new
+    signal to it, or opens a new incident if none exists. Fully
+    synchronous (safe to call from a sync request handler OR via
+    asyncio.to_thread from the background loop)."""
+    project = db.get(Project, project_id)
+    incident = (
+        db.query(Incident)
+        .filter(Incident.project_id == project_id, Incident.category == category, Incident.status != "resolved")
+        .order_by(Incident.opened_at.desc())
+        .first()
+    )
+    is_new_incident = incident is None
+    if incident is None:
+        incident = Incident(
+            project_id=project_id, category=category, severity=severity,
+            status="acknowledged" if project.incident_automation_enabled else "open",
+        )
+        db.add(incident)
+        db.flush()  # populate incident.id before the FK reference below
+    elif _SEVERITY_RANK[severity] > _SEVERITY_RANK[incident.severity]:
+        incident.severity = severity
+
+    signal = IncidentSignal(
+        incident_id=incident.id, source_type=source_type, source_id=source_id,
+        reason=reason, fingerprint=_incident_signal_fingerprint(source_type, source_id),
+    )
+    db.add(signal)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Same fingerprint already recorded (a race between two callers) —
+        # whichever call actually landed already did everything needed.
+        db.rollback()
+        return None
+
+    if is_new_incident and project.incident_webhook_url:
+        _send_incident_webhook(project.incident_webhook_url, {
+            "project_name": project.name, "category": category, "severity": incident.severity,
+            "reason": reason, "opened_at": incident.opened_at.isoformat(),
+        })
+    return signal
+
+
 # SQLAlchemy model for the "session_halts" table — a kill-switch trip
 # latched permanently once a session (see Trace.session_id) crosses one of
 # its project's max_session_* thresholds (see GET /sessions/{id}/status).
@@ -1658,7 +1749,11 @@ def _sync_trace_flag_summary(db: Session, trace: "Trace") -> None:
 def _create_trace_flag(db: Session, trace: "Trace", source: str, reason: str, severity: str = "medium") -> "TraceFlag":
     flag = TraceFlag(trace_id=trace.id, source=source, severity=severity, reason=reason)
     db.add(flag)
-    _sync_trace_flag_summary(db, trace)
+    _sync_trace_flag_summary(db, trace)  # flushes — flag.id is populated by the time this returns
+    _attach_incident_signal(
+        db, trace.project_id, category=_FLAG_SOURCE_CATEGORY[source],
+        source_type="trace_flag", source_id=flag.id, severity=severity, reason=reason,
+    )
     return flag
 
 
@@ -1828,11 +1923,12 @@ def _compute_session_status(db: Session, project: Project, session_id: uuid.UUID
 
     reason_text = "; ".join(reasons)
     try:
-        db.add(SessionHalt(project_id=project.id, session_id=session_id, reason=reason_text))
+        halt = SessionHalt(project_id=project.id, session_id=session_id, reason=reason_text)
+        db.add(halt)
         db.commit()
         # Only on the path that actually just created the halt (not the
         # IntegrityError race below) — this is the one moment the trip
-        # happens, so it's the one moment a notification should fire.
+        # happens, so it's the one moment a notification/signal should fire.
         if project.kill_switch_webhook_url:
             _send_kill_switch_webhook(project.kill_switch_webhook_url, {
                 "project_name": project.name,
@@ -1843,6 +1939,7 @@ def _compute_session_status(db: Session, project: Project, session_id: uuid.UUID
                 "elapsed_seconds": elapsed_seconds,
                 "halted_at": datetime.now(timezone.utc).isoformat(),
             })
+        _attach_incident_signal(db, project.id, category="safety", source_type="kill_switch", source_id=halt.id, severity="high", reason=reason_text)
     except IntegrityError:
         # Two concurrent calls both crossed the threshold and both tried to
         # insert the halt row — re-read whichever one actually landed rather
