@@ -2983,6 +2983,74 @@ class IncidentUpdate(BaseModel):
     resolved_note: Optional[str] = None
 
 
+@app.get("/incidents", response_model=list[IncidentResponse])
+def list_incidents(status: Optional[str] = None, category: Optional[str] = None, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    query = db.query(Incident).filter(Incident.project_id == project.id)
+    if status is not None:
+        query = query.filter(Incident.status == status)
+    if category is not None:
+        query = query.filter(Incident.category == category)
+    incidents = query.order_by(Incident.opened_at.desc()).all()
+
+    results = []
+    for incident in incidents:
+        signals = db.query(IncidentSignal).filter(IncidentSignal.incident_id == incident.id).order_by(IncidentSignal.created_at.asc()).all()
+        results.append(IncidentResponse(
+            **IncidentResponse.model_validate(incident).model_dump(exclude={"signals"}),
+            signals=[IncidentSignalResponse.model_validate(s) for s in signals],
+        ))
+    return results
+
+
+@app.get("/incidents/{incident_id}", response_model=IncidentResponse)
+def get_incident(incident_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    incident = db.get(Incident, incident_id)
+    if incident is None or incident.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    signals = db.query(IncidentSignal).filter(IncidentSignal.incident_id == incident.id).order_by(IncidentSignal.created_at.asc()).all()
+    return IncidentResponse(
+        **IncidentResponse.model_validate(incident).model_dump(exclude={"signals"}),
+        signals=[IncidentSignalResponse.model_validate(s) for s in signals],
+    )
+
+
+# open -> acknowledged -> resolved only. resolved is terminal — no
+# transition out (see the design spec's state machine). A new signal for
+# this (project, category) after resolution opens a NEW incident rather
+# than reviving this one (already guaranteed by _attach_incident_signal's
+# "status != resolved" lookup).
+_INCIDENT_TRANSITIONS = {
+    "open": {"acknowledged", "resolved"},
+    "acknowledged": {"resolved"},
+    "resolved": set(),
+}
+
+
+@app.patch("/incidents/{incident_id}", response_model=IncidentResponse)
+def update_incident(incident_id: uuid.UUID, update: IncidentUpdate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    incident = db.get(Incident, incident_id)
+    if incident is None or incident.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if update.status not in _INCIDENT_TRANSITIONS[incident.status]:
+        raise HTTPException(status_code=409, detail=f"Cannot transition incident from {incident.status!r} to {update.status!r}")
+
+    now = datetime.now(timezone.utc)
+    incident.status = update.status
+    if update.status == "acknowledged":
+        incident.acknowledged_at = now
+    elif update.status == "resolved":
+        incident.resolved_at = now
+        incident.resolved_note = update.resolved_note
+
+    db.commit()
+    db.refresh(incident)
+    signals = db.query(IncidentSignal).filter(IncidentSignal.incident_id == incident.id).order_by(IncidentSignal.created_at.asc()).all()
+    return IncidentResponse(
+        **IncidentResponse.model_validate(incident).model_dump(exclude={"signals"}),
+        signals=[IncidentSignalResponse.model_validate(s) for s in signals],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Continuous (online) scoring — a background loop that runs any scorer with
 # run_online=True against new traces automatically, reusing _run_custom_
