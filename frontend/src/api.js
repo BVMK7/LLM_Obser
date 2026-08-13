@@ -224,6 +224,14 @@ export async function flagTrace(id, payload) {
   return request(`/traces/${id}/flag`, { method: "PATCH", body: payload, errorMessage: "Failed to update review flag" });
 }
 
+// Review queue backed by the real trace_flags table — each flagged trace
+// carries its own list of flags (source/severity/reason), instead of the
+// single flagged_for_review/review_note pair flagTrace() above still writes
+// to for backward compatibility.
+export const getFlaggedTraces = () => request("/traces/flagged", { errorMessage: "Failed to load flagged traces" });
+export const resolveTraceFlag = (traceId, flagId, payload = {}) =>
+  request(`/traces/${traceId}/flags/${flagId}`, { method: "PATCH", body: payload, errorMessage: "Failed to resolve flag" });
+
 export const getScorers = () => request("/scorers", { errorMessage: "Failed to load scorers" });
 export const getScorer = (id) => request(`/scorers/${id}`, { errorMessage: "Failed to load scorer" });
 export const createScorer = (payload) => request("/scorers", { method: "POST", body: payload, errorMessage: "Failed to create scorer" });
@@ -286,3 +294,10 @@ export const acceptInvite = (token) =>
 export const getAgents = () => request("/agents", { errorMessage: "Failed to load agents" });
 export const getAgentCosts = (windowMinutes) =>
   request("/agents/costs", { params: { window_minutes: windowMinutes }, errorMessage: "Failed to load agent costs" });
+
+// Policy engine — advisory rules (blocked model/tool, cost cap) an agent
+// checks against before acting. Nothing here blocks a write itself.
+export const getPolicies = () => request("/policies", { errorMessage: "Failed to load policies" });
+export const createPolicy = (payload) => request("/policies", { method: "POST", body: payload, errorMessage: "Failed to create policy" });
+export const updatePolicy = (id, payload) => request(`/policies/${id}`, { method: "PUT", body: payload, errorMessage: "Failed to update policy" });
+export const deletePolicy = (id) => request(`/policies/${id}`, { method: "DELETE", errorMessage: "Failed to delete policy" });

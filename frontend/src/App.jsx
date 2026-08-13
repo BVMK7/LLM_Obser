@@ -25,6 +25,7 @@ import Alerts from "./pages/Alerts";
 import Review from "./pages/Review";
 import Settings from "./pages/Settings";
 import Agents from "./pages/Agents";
+import Policies from "./pages/Policies";
 
 // Applies the platform theme's data-theme attribute to the app shell —
 // needs to live inside ThemeProvider to read the current theme via context.
@@ -53,6 +54,7 @@ function AuthenticatedApp() {
             <Route path="/models" element={<Navigate to="/providers" replace />} />
             <Route path="/prompt-library" element={<PromptLibrary />} />
             <Route path="/alerts" element={<Alerts />} />
+            <Route path="/policies" element={<Policies />} />
             <Route path="/review" element={<Review />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/projects/:id/settings" element={<ProjectSettings />} />

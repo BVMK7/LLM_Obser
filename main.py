@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 import bcrypt
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, Header, HTTPException, Request
+from fastapi import FastAPI, Depends, Header, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
@@ -276,6 +276,25 @@ class Trace(Base):
     scores = relationship("Score", order_by="Score.created_at")
 
 
+# One row per flag EVENT on a trace — replaces cramming every flag into
+# Trace.review_note as a "; "-joined string (see _create_trace_flag below).
+# Trace.flagged_for_review/review_note stay as columns for backward
+# compatibility (nothing that reads them should break) but become DERIVED:
+# recomputed from this table's open rows by _sync_trace_flag_summary
+# whenever a flag is created or resolved.
+class TraceFlag(Base):
+    __tablename__ = "trace_flags"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    trace_id = Column(UUID(as_uuid=True), ForeignKey("traces.id", ondelete="CASCADE"), nullable=False)
+    source = Column(String, nullable=False)    # "manual" | "anomaly" | "guardrail"
+    severity = Column(String, nullable=False, server_default="medium")  # "low" | "medium" | "high"
+    reason = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    resolved_at = Column(DateTime(timezone=True))
+    resolved_note = Column(Text)
+
+
 # SQLAlchemy model for the "spans" table — one row per step within a trace.
 class Span(Base):
     __tablename__ = "spans"
@@ -293,6 +312,10 @@ class Span(Base):
     ended_at = Column(DateTime(timezone=True))
     error = Column(Text)               # raw error message, if this step failed
     error_explanation = Column(Text)   # plain-language explanation of the error, filled in automatically
+    # One of _FAILURE_CATEGORIES (see _explain_error) — filled in alongside
+    # error_explanation from the SAME Groq call, not a second one. NULL until
+    # that background task (see POST /spans) completes, or if there's no error.
+    failure_category = Column(Text)
 
 
 # SQLAlchemy model for the "scores" table — an LLM-judged score for a trace
@@ -456,6 +479,27 @@ class AlertRule(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
 
 
+# Advisory policy rules (see POST /policies/check) — same shape as Scorer/
+# AlertRule: project-scoped, an `enabled` flag, and a JSONB `config` blob
+# whose keys depend on `rule_type` (mirrors Scorer.choice_scores' "flexible
+# JSONB payload keyed by rule kind" convention):
+#   blocked_model:      {"models": ["gpt-4", ...]}
+#   blocked_tool:        {"tools": ["shell_exec", ...]}
+#   max_cost_per_call:  {"max_cost": 0.50}
+# Advisory only, matching kill-switch/guardrails — nothing here blocks a
+# write; the caller checks first and decides for itself.
+class PolicyRule(Base):
+    __tablename__ = "policy_rules"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default="gen_random_uuid()")
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String, nullable=False)
+    rule_type = Column(String, nullable=False)  # "blocked_model" | "max_cost_per_call" | "blocked_tool"
+    config = Column(JSONB, nullable=False)
+    enabled = Column(Boolean, nullable=False, server_default="true")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+
+
 # SQLAlchemy model for the "session_halts" table — a kill-switch trip
 # latched permanently once a session (see Trace.session_id) crosses one of
 # its project's max_session_* thresholds (see GET /sessions/{id}/status).
@@ -595,6 +639,9 @@ class SpanResponse(SpanBase):
     started_at: datetime
     # Plain-language explanation of `error`, generated automatically — never sent by the caller.
     error_explanation: Optional[str] = None
+    # One of _FAILURE_CATEGORIES, filled in alongside error_explanation —
+    # both null until the background classification task completes.
+    failure_category: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1396,6 +1443,55 @@ def list_traces(
     return traces
 
 
+# GET /traces/flagged — the Review queue's real backend query: traces with
+# at least one currently-open flag, each including its full flag list
+# (source/severity/reason/timestamps). Replaces Review.jsx's previous
+# approach of fetching every trace via GET /traces and filtering
+# flagged_for_review client-side. MUST be registered before GET
+# /traces/{trace_id} below — FastAPI/Starlette matches routes in
+# registration order, and "flagged" would otherwise fail {trace_id}'s UUID
+# validation (a 422) before ever reaching this route.
+class TraceFlagResponse(BaseModel):
+    id: uuid.UUID
+    source: str
+    severity: str
+    reason: str
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+    resolved_note: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FlaggedTraceResponse(TraceResponse):
+    flags: list[TraceFlagResponse] = []
+
+
+@app.get("/traces/flagged", response_model=list[FlaggedTraceResponse])
+def list_flagged_traces(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    trace_ids_with_open_flags = (
+        db.query(TraceFlag.trace_id).filter(TraceFlag.resolved_at.is_(None)).distinct().subquery()
+    )
+    traces = (
+        db.query(Trace)
+        .filter(Trace.project_id == project.id, Trace.id.in_(db.query(trace_ids_with_open_flags)))
+        .order_by(Trace.started_at.desc())
+        .all()
+    )
+
+    results = []
+    for trace in traces:
+        trace.status = (
+            "error" if any(span.error for span in trace.spans) else ("pending" if trace.ended_at is None else "success")
+        )
+        flags = db.query(TraceFlag).filter(TraceFlag.trace_id == trace.id).order_by(TraceFlag.created_at.desc()).all()
+        results.append(FlaggedTraceResponse(
+            **TraceResponse.model_validate(trace).model_dump(),
+            flags=[TraceFlagResponse.model_validate(f) for f in flags],
+        ))
+    return results
+
+
 # 8. GET /traces/{trace_id} — fetches one trace along with all of its spans.
 @app.get("/traces/{trace_id}", response_model=TraceWithSpans)
 def get_trace(trace_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
@@ -1415,16 +1511,31 @@ def get_trace(trace_id: uuid.UUID, db: Session = Depends(get_db), project: Proje
 
 
 # PATCH /traces/{trace_id}/flag — manual human-review workflow: flag a trace
-# for a second look (optionally with a note), or clear the flag once resolved.
-# Backs the Review queue page; nothing here is scored/graded automatically.
+# for a second look (optionally with a note), or clear the flag once
+# resolved. Backs the Review queue page; nothing here is scored/graded
+# automatically. Routes through the same trace_flags helpers anomaly
+# detection/guardrails use, rather than setting flagged_for_review/
+# review_note directly — this endpoint's own request/response shape is
+# unchanged, so Review.jsx's existing "Resolve" button keeps working as-is,
+# now backed by real per-flag records instead of two bare columns:
+# flagged_for_review=true creates a "manual" flag; false resolves every
+# currently-open flag on the trace (whatever their source).
 @app.patch("/traces/{trace_id}/flag", response_model=TraceResponse)
 def flag_trace(trace_id: uuid.UUID, update: TraceFlagUpdate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_trace = db.get(Trace, trace_id)
     if db_trace is None or db_trace.project_id != project.id:
         raise HTTPException(status_code=404, detail="Trace not found")
 
-    db_trace.flagged_for_review = update.flagged_for_review
-    db_trace.review_note = update.review_note
+    if update.flagged_for_review:
+        _create_trace_flag(db, db_trace, source="manual", severity="medium", reason=update.review_note or "Manually flagged for review")
+    else:
+        open_flags = db.query(TraceFlag).filter(TraceFlag.trace_id == trace_id, TraceFlag.resolved_at.is_(None)).all()
+        now = datetime.now(timezone.utc)
+        for flag in open_flags:
+            flag.resolved_at = now
+            flag.resolved_note = update.review_note
+        _sync_trace_flag_summary(db, db_trace)
+
     db.commit()
     db.refresh(db_trace)
 
@@ -1432,6 +1543,63 @@ def flag_trace(trace_id: uuid.UUID, update: TraceFlagUpdate, db: Session = Depen
         "error" if any(span.error for span in db_trace.spans) else ("pending" if db_trace.ended_at is None else "success")
     )
     return db_trace
+
+
+# PATCH /traces/{trace_id}/flags/{flag_id} — resolves ONE specific flag,
+# unlike PATCH /traces/{id}/flag (which resolves every open flag at once,
+# for backward compatibility with Review.jsx's existing "Resolve" button).
+# A trace with other flags still open stays flagged_for_review=True.
+class TraceFlagResolve(BaseModel):
+    resolved_note: Optional[str] = None
+
+
+@app.patch("/traces/{trace_id}/flags/{flag_id}", response_model=TraceFlagResponse)
+def resolve_trace_flag(trace_id: uuid.UUID, flag_id: uuid.UUID, body: TraceFlagResolve, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_trace = db.get(Trace, trace_id)
+    if db_trace is None or db_trace.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    flag = db.get(TraceFlag, flag_id)
+    if flag is None or flag.trace_id != trace_id:
+        raise HTTPException(status_code=404, detail="Flag not found")
+
+    flag.resolved_at = datetime.now(timezone.utc)
+    flag.resolved_note = body.resolved_note
+    _sync_trace_flag_summary(db, db_trace)
+    db.commit()
+    db.refresh(flag)
+    return flag
+
+
+# Recomputes Trace.flagged_for_review/review_note from trace_flags' open
+# (unresolved) rows — called after every flag create/resolve so these two
+# columns stay a correct, cheap-to-read SUMMARY of the real per-flag data,
+# for anything that only ever reads the trace-level fields (unchanged
+# external contract on TraceResponse/GET /traces).
+def _sync_trace_flag_summary(db: Session, trace: "Trace") -> None:
+    # This session has autoflush=False (see SessionLocal above) — without an
+    # explicit flush here, this query wouldn't see any not-yet-flushed
+    # create/resolve change a caller just made in the same request (e.g.
+    # flag_trace's resolve-all branch mutates flag.resolved_at on existing
+    # objects, which is invisible to a fresh query until flushed), so
+    # flagged_for_review would lag one write behind. Flushing here once,
+    # centrally, means every caller gets this for free.
+    db.flush()
+    open_flags = db.query(TraceFlag).filter(TraceFlag.trace_id == trace.id, TraceFlag.resolved_at.is_(None)).all()
+    trace.flagged_for_review = len(open_flags) > 0
+    trace.review_note = "; ".join(f.reason for f in open_flags) if open_flags else None
+
+
+# Single write path for flagging a trace — used by manual flags (PATCH
+# /traces/{id}/flag), _check_trace_anomalies, and POST /guardrails/check.
+# Replaces each of those concatenating review_note themselves: one row per
+# flag EVENT (source/severity/reason kept distinct) instead of a "; "-joined
+# string that loses which flag came from where and destroys history when
+# any one of them gets resolved.
+def _create_trace_flag(db: Session, trace: "Trace", source: str, reason: str, severity: str = "medium") -> "TraceFlag":
+    flag = TraceFlag(trace_id=trace.id, source=source, severity=severity, reason=reason)
+    db.add(flag)
+    _sync_trace_flag_summary(db, trace)
+    return flag
 
 
 # Rule-based anomaly detection — cheap, pure-SQL heuristics (no LLM call),
@@ -1541,9 +1709,7 @@ def update_trace(trace_id: uuid.UUID, update: TraceUpdate, db: Session = Depends
     if "ended_at" in updated_fields:
         reasons = _check_trace_anomalies(db, db_trace)
         if reasons:
-            note = "Anomaly: " + "; ".join(reasons)
-            db_trace.flagged_for_review = True
-            db_trace.review_note = f"{db_trace.review_note}; {note}" if db_trace.review_note else note
+            _create_trace_flag(db, db_trace, source="anomaly", severity="medium", reason="; ".join(reasons))
 
     db.commit()
     db.refresh(db_trace)
@@ -1928,32 +2094,69 @@ def agent_costs(window_minutes: Optional[int] = None, db: Session = Depends(get_
 
 
 # Helper for POST /spans below: turns a raw error message into a short,
-# jargon-free explanation using Groq (reusing the same free-tier wrapper
-# from providers.py that Playground/Evaluation call). If the explanation
-# call itself fails, we return a fallback string instead of raising —
-# a broken "explain the error" feature shouldn't break error logging.
-def _explain_error(step_name: str, input: Optional[str], error: str) -> str:
+# jargon-free explanation PLUS a category, using one Groq call (reusing the
+# same free-tier wrapper from providers.py that Playground/Evaluation call)
+# — failure classification piggybacks on the explanation call instead of
+# making a second one. If the call fails or returns something unparseable,
+# we return a fallback dict instead of raising — a broken "explain the
+# error" feature shouldn't break error logging, and category always falls
+# back to "unknown" rather than inventing one outside the fixed set.
+_FAILURE_CATEGORIES = ["rate_limit", "timeout", "auth_error", "validation_error", "tool_error", "context_length", "unknown"]
+
+
+def _explain_error(step_name: str, input: Optional[str], error: str) -> dict:
     call_groq = PROVIDERS["groq"]
     prompt = (
         "You are helping a beginner developer understand an error in their AI pipeline. "
         f"Here is the step that failed: {step_name}. "
         f"Here is the input: {input}. "
         f"Here is the raw error: {error}. "
-        "Explain in 2-3 simple sentences what likely went wrong and suggest one possible fix. "
-        "Avoid jargon."
+        "Respond with ONLY a JSON object, no other text, in this exact shape: "
+        '{"category": "<one of ' + ", ".join(_FAILURE_CATEGORIES) + '>", '
+        '"explanation": "<2-3 simple, jargon-free sentences on what likely went wrong and one possible fix>"}'
     )
     try:
-        explanation, _input_tokens, _output_tokens = call_groq(prompt)
-        return explanation
+        raw, _input_tokens, _output_tokens = call_groq(prompt)
+        # LLMs sometimes wrap JSON in a ```json ... ``` fence despite being
+        # asked not to — same strip-then-parse pattern score_trace.py uses.
+        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(cleaned)
+        category = parsed.get("category") if parsed.get("category") in _FAILURE_CATEGORIES else "unknown"
+        explanation = parsed.get("explanation") or raw.strip()
+        return {"category": category, "explanation": explanation}
     except Exception as e:
-        return f"(Couldn't generate an explanation: {e})"
+        return {"category": "unknown", "explanation": f"(Couldn't generate an explanation: {e})"}
 
 
-# 9. POST /spans — creates a new span row (one step within a trace) and returns it.
-# If the caller included an `error`, we also generate a plain-language
-# explanation and store it in `error_explanation` before returning.
+# Runs AFTER the response for POST/PATCH /spans has already gone out (see
+# BackgroundTasks below) — the caller gets its span back immediately
+# instead of waiting on this Groq call, the one genuinely slow inline step
+# on the ingestion path. Opens its own DB session since the request's
+# session is already closed by the time a background task actually runs
+# (same one-session-per-unit-of-work shape _online_scoring_loop uses).
+def _explain_and_save_failure(span_id: uuid.UUID) -> None:
+    db = SessionLocal()
+    try:
+        db_span = db.get(Span, span_id)
+        if db_span is None or not db_span.error:
+            return
+        result = _explain_error(db_span.step_name, db_span.input, db_span.error)
+        db_span.error_explanation = result["explanation"]
+        db_span.failure_category = result["category"]
+        db.commit()
+    except Exception as e:
+        print(f"[async-ingestion] failed to explain/classify error for span {span_id}: {e}")
+    finally:
+        db.close()
+
+
+# 9. POST /spans — creates a new span row (one step within a trace) and
+# returns it immediately. If the caller included an `error`, the
+# explanation + failure category are filled in moments later by a
+# background task (see _explain_and_save_failure) — not before returning,
+# so a slow Groq call never blocks trace/span ingestion.
 @app.post("/spans", response_model=SpanResponse)
-def create_span(span: SpanCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+def create_span(span: SpanCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     parent_trace = db.get(Trace, span.trace_id)
     if parent_trace is None or parent_trace.project_id != project.id:
         raise HTTPException(status_code=404, detail="Trace not found")
@@ -1970,9 +2173,7 @@ def create_span(span: SpanCreate, db: Session = Depends(get_db), project: Projec
     db.refresh(db_span)
 
     if db_span.error:
-        db_span.error_explanation = _explain_error(db_span.step_name, db_span.input, db_span.error)
-        db.commit()
-        db.refresh(db_span)
+        background_tasks.add_task(_explain_and_save_failure, db_span.id)
 
     return db_span
 
@@ -1980,7 +2181,7 @@ def create_span(span: SpanCreate, db: Session = Depends(get_db), project: Projec
 # PATCH /spans/{span_id} — fills in the rest of a span created earlier (see
 # SpanUpdate above and PATCH /traces/{trace_id}'s docstring for why).
 @app.patch("/spans/{span_id}", response_model=SpanResponse)
-def update_span(span_id: uuid.UUID, update: SpanUpdate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+def update_span(span_id: uuid.UUID, update: SpanUpdate, background_tasks: BackgroundTasks, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     db_span = db.get(Span, span_id)
     if db_span is None:
         raise HTTPException(status_code=404, detail="Span not found")
@@ -1994,9 +2195,7 @@ def update_span(span_id: uuid.UUID, update: SpanUpdate, db: Session = Depends(ge
     db.refresh(db_span)
 
     if db_span.error and not db_span.error_explanation:
-        db_span.error_explanation = _explain_error(db_span.step_name, db_span.input, db_span.error)
-        db.commit()
-        db.refresh(db_span)
+        background_tasks.add_task(_explain_and_save_failure, db_span.id)
 
     return db_span
 
@@ -2489,12 +2688,105 @@ def check_guardrail(req: GuardrailCheckRequest, db: Session = Depends(get_db), p
     flagged = result["score"] is not None and result["score"] < float(scorer.pass_threshold)
 
     if flagged:
-        note = f"Flagged by guardrail {scorer.slug!r}: {result['explanation']}"
-        parent_trace.flagged_for_review = True
-        parent_trace.review_note = f"{parent_trace.review_note}; {note}" if parent_trace.review_note else note
+        _create_trace_flag(db, parent_trace, source="guardrail", severity="high", reason=f"guardrail {scorer.slug!r}: {result['explanation']}")
         db.commit()
 
     return GuardrailCheckResponse(flagged=flagged, score=result["score"], explanation=result["explanation"])
+
+
+# ---------------------------------------------------------------------------
+# Policy engine — advisory rule checks (cost/model/tool restrictions),
+# matching the kill-switch/guardrails precedent exactly: the caller checks
+# BEFORE acting and decides for itself, nothing here blocks a write. Pure
+# Python/SQL comparison against enabled PolicyRule rows for the project —
+# no LLM call, cheap enough to call before every step.
+# ---------------------------------------------------------------------------
+class PolicyRuleCreate(BaseModel):
+    name: str
+    rule_type: Literal["blocked_model", "max_cost_per_call", "blocked_tool"]
+    config: dict
+    enabled: bool = True
+
+
+class PolicyRuleResponse(PolicyRuleCreate):
+    id: uuid.UUID
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+@app.get("/policies", response_model=list[PolicyRuleResponse])
+def list_policies(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    return db.query(PolicyRule).filter(PolicyRule.project_id == project.id).order_by(PolicyRule.created_at.desc()).all()
+
+
+@app.post("/policies", response_model=PolicyRuleResponse)
+def create_policy(policy: PolicyRuleCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_policy = PolicyRule(project_id=project.id, **policy.model_dump())
+    db.add(db_policy)
+    db.commit()
+    db.refresh(db_policy)
+    return db_policy
+
+
+@app.put("/policies/{policy_id}", response_model=PolicyRuleResponse)
+def update_policy(policy_id: uuid.UUID, policy: PolicyRuleCreate, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_policy = db.get(PolicyRule, policy_id)
+    if db_policy is None or db_policy.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    db_policy.name = policy.name
+    db_policy.rule_type = policy.rule_type
+    db_policy.config = policy.config
+    db_policy.enabled = policy.enabled
+    db.commit()
+    db.refresh(db_policy)
+    return db_policy
+
+
+@app.delete("/policies/{policy_id}")
+def delete_policy(policy_id: uuid.UUID, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    db_policy = db.get(PolicyRule, policy_id)
+    if db_policy is None or db_policy.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    db.delete(db_policy)
+    db.commit()
+    return {"ok": True}
+
+
+class PolicyCheckRequest(BaseModel):
+    trace_id: Optional[uuid.UUID] = None
+    model: Optional[str] = None
+    tool_name: Optional[str] = None
+    estimated_cost: Optional[float] = None
+
+
+class PolicyCheckResponse(BaseModel):
+    allowed: bool
+    violations: list[str]
+
+
+@app.post("/policies/check", response_model=PolicyCheckResponse)
+def check_policy(req: PolicyCheckRequest, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    rules = db.query(PolicyRule).filter(PolicyRule.project_id == project.id, PolicyRule.enabled.is_(True)).all()
+    violations = []
+
+    for rule in rules:
+        try:
+            if rule.rule_type == "blocked_model" and req.model is not None:
+                if req.model in rule.config.get("models", []):
+                    violations.append(f"model {req.model!r} is blocked by policy {rule.name!r}")
+            elif rule.rule_type == "blocked_tool" and req.tool_name is not None:
+                if req.tool_name in rule.config.get("tools", []):
+                    violations.append(f"tool {req.tool_name!r} is blocked by policy {rule.name!r}")
+            elif rule.rule_type == "max_cost_per_call" and req.estimated_cost is not None:
+                max_cost = rule.config.get("max_cost")
+                if max_cost is not None and req.estimated_cost > float(max_cost):
+                    violations.append(f"estimated cost ${req.estimated_cost:.4f} exceeds policy {rule.name!r}'s cap of ${float(max_cost):.4f}")
+        except Exception as e:
+            # A malformed config on one rule shouldn't block checking the rest.
+            print(f"[policy-engine] failed to evaluate policy {rule.id}: {e}")
+
+    return PolicyCheckResponse(allowed=len(violations) == 0, violations=violations)
 
 
 # ---------------------------------------------------------------------------

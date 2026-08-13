@@ -31,6 +31,12 @@ returned dict's "halted" is True, stop the agent and surface "reason"
 instead of continuing — the thresholds live on the project (admin-set), not
 something this SDK call can raise itself.
 
+Policy engine — call `client.check_policy(model=..., tool_name=...,
+estimated_cost=...)` before a model/tool call to check it against
+admin-configured rules (blocked models, blocked tools, per-call cost caps).
+Advisory, like the kill-switch: if "allowed" is False, stop and surface
+"violations" instead of proceeding.
+
 Agent memory & messaging — pass `agent_name=` to `client.traced(...)` to
 attribute a trace to a named agent (auto-registered on first use; the same
 name always resolves to the same agent). `client.remember`/`recall`/
@@ -115,6 +121,23 @@ class Client:
                 "span_id": span_id,
                 "scorer_slug": scorer_slug,
                 "text": text,
+            },
+        )
+
+    def check_policy(self, trace_id: str = None, model: str = None, tool_name: str = None, estimated_cost: float = None) -> dict:
+        """Advisory policy check — call this before letting the agent call a
+        model/tool or before an expensive step, matching check_injection's
+        shape. Pure rule comparison, no LLM call. Returns {"allowed": bool,
+        "violations": [str]}; if "allowed" is False, stop and surface
+        "violations" instead of proceeding. Pass only whichever of
+        model/tool_name/estimated_cost is relevant to this check."""
+        return self._post(
+            "/policies/check",
+            {
+                "trace_id": trace_id,
+                "model": model,
+                "tool_name": tool_name,
+                "estimated_cost": estimated_cost,
             },
         )
 

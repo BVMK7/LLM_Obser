@@ -211,6 +211,17 @@ export function MoonIcon(props) {
   );
 }
 
+// Sidebar nav item for the Policies page — a shield, standing in for
+// admin-configured guardrails an agent checks against before acting.
+export function PoliciesIcon(props) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 3 4.5 6v6c0 4.5 3.2 7.7 7.5 9 4.3-1.3 7.5-4.5 7.5-9V6L12 3Z" />
+      <path d="M9 12l2 2 4-4" />
+    </IconBase>
+  );
+}
+
 // Sidebar nav item for the Agents page — three connected nodes, standing in
 // for multiple agents coordinating (memory/messages/cost all revolve around
 // more than one named agent).

@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { getTraces, flagTrace, createScore } from "../api";
+import { getFlaggedTraces, resolveTraceFlag, flagTrace, createScore } from "../api";
 import Skeleton from "../components/Skeleton";
 import StatusPill from "../components/StatusPill";
-import { extractProvider, formatRelativeTime } from "../utils";
+import { extractProvider, formatRelativeTime, formatTimestamp } from "../utils";
 
 function ReviewSkeleton() {
   return (
@@ -21,18 +21,52 @@ function ReviewSkeleton() {
   );
 }
 
-// A queue of traces a human explicitly flagged (via TraceDetails' "Flag for
-// review" button), plus a quick manual scoring form. There's no automatic
-// triage here — flagging is a deliberate human action, this page just
-// collects what's been flagged so far.
+const SEVERITY_STYLES = {
+  low: { color: "var(--text-muted)", bg: "color-mix(in srgb, var(--text-muted) 12%, transparent)" },
+  medium: { color: "var(--brand-warning)", bg: "color-mix(in srgb, var(--brand-warning) 12%, transparent)" },
+  high: { color: "var(--brand-danger)", bg: "color-mix(in srgb, var(--brand-danger) 12%, transparent)" },
+};
+
+const SOURCE_LABELS = {
+  manual: "Manual",
+  anomaly: "Anomaly",
+  guardrail: "Guardrail",
+};
+
+function SeverityPill({ severity }) {
+  const style = SEVERITY_STYLES[severity] || SEVERITY_STYLES.medium;
+  return (
+    <span
+      className="inline-block text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded font-medium"
+      style={{ backgroundColor: style.bg, color: style.color }}
+    >
+      {severity}
+    </span>
+  );
+}
+
+function SourceBadge({ source }) {
+  return (
+    <span className="inline-block text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded font-medium bg-white/5 text-[var(--text-secondary)]">
+      {SOURCE_LABELS[source] || source}
+    </span>
+  );
+}
+
+// A queue of traces with at least one open flag — from an anomaly, a
+// guardrail trip, or a human explicitly flagging via TraceDetails' "Flag for
+// review" button — plus a quick manual scoring form. Each flag is its own
+// row (source/severity/reason) so resolving one doesn't erase the others'
+// history; a trace only drops off this list once every one of its flags is
+// resolved.
 export default function Review() {
   const [traces, setTraces] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [scoreDrafts, setScoreDrafts] = useState({});
+  const [resolvingFlagId, setResolvingFlagId] = useState(null);
 
-  const refresh = () =>
-    getTraces().then((data) => setTraces(data.filter((t) => t.flagged_for_review)));
+  const refresh = () => getFlaggedTraces().then(setTraces);
 
   useEffect(() => {
     refresh()
@@ -40,8 +74,20 @@ export default function Review() {
       .finally(() => setLoading(false));
   }, []);
 
-  const handleResolve = async (id) => {
-    await flagTrace(id, { flagged_for_review: false, review_note: null });
+  const handleResolveFlag = async (traceId, flagId) => {
+    setResolvingFlagId(flagId);
+    try {
+      await resolveTraceFlag(traceId, flagId);
+      await refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setResolvingFlagId(null);
+    }
+  };
+
+  const handleResolveAll = async (traceId) => {
+    await flagTrace(traceId, { flagged_for_review: false, review_note: null });
     await refresh();
   };
 
@@ -63,7 +109,8 @@ export default function Review() {
     <div>
       <h1 className="text-2xl font-semibold text-[var(--text-primary)] mb-1">Review Queue</h1>
       <p className="text-sm text-[var(--text-muted)] mb-6">
-        Traces flagged for a second look — resolve once handled, or record a manual score.
+        Traces with an open flag — from a human, an anomaly check, or a guardrail trip. Resolve each flag once
+        handled; a trace clears once none are left open.
       </p>
 
       {error && <div className="text-red-400 mb-4">{error}</div>}
@@ -76,9 +123,11 @@ export default function Review() {
         <div className="flex flex-col gap-3">
           {traces.map((t) => {
             const draft = scoreDrafts[t.id] || { name: "", value: "", explanation: "" };
+            const openFlags = t.flags.filter((f) => !f.resolved_at);
+            const resolvedFlags = t.flags.filter((f) => f.resolved_at);
             return (
               <div key={t.id} className="bg-[var(--bg-card)] border border-[var(--border-subtle)] rounded-xl p-4">
-                <div className="flex items-start justify-between mb-2">
+                <div className="flex items-start justify-between mb-3">
                   <div>
                     <Link to={`/traces/${t.id}`} className="text-sm font-medium text-[var(--brand-primary)] hover:underline">
                       {t.name}
@@ -90,18 +139,45 @@ export default function Review() {
                   <div className="flex items-center gap-2">
                     <StatusPill status={t.status} />
                     <button
-                      onClick={() => handleResolve(t.id)}
+                      onClick={() => handleResolveAll(t.id)}
                       className="text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)] hover:bg-white/10 transition-colors"
+                      title="Resolve every open flag on this trace at once"
                     >
-                      Resolve
+                      Resolve all
                     </button>
                   </div>
                 </div>
-                {t.review_note && (
-                  <div className="text-sm text-[var(--text-secondary)] mb-3 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg p-2">
-                    {t.review_note}
-                  </div>
-                )}
+
+                <div className="flex flex-col gap-2 mb-3">
+                  {openFlags.map((f) => (
+                    <div
+                      key={f.id}
+                      className="flex items-start justify-between gap-3 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg p-2.5"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <SourceBadge source={f.source} />
+                          <SeverityPill severity={f.severity} />
+                          <span className="text-[11px] text-[var(--text-muted)]">{formatTimestamp(f.created_at)}</span>
+                        </div>
+                        <div className="text-sm text-[var(--text-secondary)]">{f.reason}</div>
+                      </div>
+                      <button
+                        onClick={() => handleResolveFlag(t.id, f.id)}
+                        disabled={resolvingFlagId === f.id}
+                        className="shrink-0 text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)] hover:bg-white/10 disabled:opacity-40 transition-colors"
+                      >
+                        {resolvingFlagId === f.id ? "Resolving…" : "Resolve"}
+                      </button>
+                    </div>
+                  ))}
+                  {resolvedFlags.length > 0 && (
+                    <div className="text-xs text-[var(--text-muted)] px-1">
+                      {resolvedFlags.length} resolved flag{resolvedFlags.length === 1 ? "" : "s"} on this trace
+                    </div>
+                  )}
+                </div>
+
                 <div className="flex gap-2 items-center">
                   <input
                     value={draft.name}
