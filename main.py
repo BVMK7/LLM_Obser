@@ -3442,6 +3442,146 @@ def _evaluate_alert_rule(rule: AlertRule, db: Session) -> AlertStatus:
     )
 
 
+# Scans ALL enabled rules (unlike _due_alert_rules, which only returns
+# rules with a webhook_url set) — a rule with no webhook configured should
+# still raise an incident. Own cooldown field (last_incident_signal_at),
+# separate from the webhook-only last_notified_at, so the two concerns
+# don't gate each other.
+def _run_incident_correlation_once(db: Session) -> None:
+    rules = db.query(AlertRule).filter(AlertRule.enabled.is_(True)).all()
+    for rule in rules:
+        try:
+            status = _evaluate_alert_rule(rule, db)
+            if not status.triggered:
+                continue
+
+            now = datetime.now(timezone.utc)
+            cooldown_elapsed = rule.last_incident_signal_at is None or (now - rule.last_incident_signal_at) >= timedelta(minutes=rule.window_minutes)
+            if not cooldown_elapsed:
+                continue
+
+            reason = f"{rule.metric} {rule.comparator} {rule.threshold} (current: {status.current_value})"
+            _attach_incident_signal(
+                db, rule.project_id, category=_ALERT_METRIC_CATEGORY[rule.metric],
+                source_type="alert_rule", source_id=rule.id, severity="medium", reason=reason,
+            )
+            rule.last_incident_signal_at = now
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"[incident-correlation] failed processing rule {rule.id}: {e}")
+
+
+# Advisory recovery guidance — one Groq call per incident, synthesizing
+# across every signal attached so far into a plain-language likely cause
+# plus concrete next steps. Same client/fence-strip-then-json.loads
+# convention _explain_error already uses. Never auto-executed — see the
+# design spec's "recovery stays advisory" decision.
+def _generate_incident_recovery_guidance(incident: "Incident", signals: list) -> dict:
+    call_groq = PROVIDERS["groq"]
+    signal_lines = "\n".join(f"- ({s.source_type}) {s.reason}" for s in signals)
+    prompt = (
+        "You are an on-call engineer's assistant looking at a correlated incident in an LLM "
+        f"observability platform. Category: {incident.category}. Severity: {incident.severity}. "
+        f"Signals contributing to this incident:\n{signal_lines}\n\n"
+        "Respond with ONLY a JSON object, no other text, in this exact shape: "
+        '{"likely_cause": "<1-2 plain-language sentences on what is probably wrong>", '
+        '"suggested_actions": ["<short actionable step>", "..."], '
+        '"confidence": "<one of low, medium, high>"}'
+    )
+    try:
+        raw, _in_tok, _out_tok = call_groq(prompt)
+        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(cleaned)
+        confidence = parsed.get("confidence") if parsed.get("confidence") in ("low", "medium", "high") else "low"
+        return {
+            "likely_cause": parsed.get("likely_cause") or "Unable to determine a likely cause.",
+            "suggested_actions": parsed.get("suggested_actions") or [],
+            "confidence": confidence,
+        }
+    except Exception as e:
+        return {"likely_cause": f"(Couldn't generate a suggestion: {e})", "suggested_actions": [], "confidence": "low"}
+
+
+# Regenerates for any non-resolved incident that either has never had
+# guidance generated, or has a signal newer than its last generation AND
+# recovery_generated_at is more than 5 minutes old — the rate limit that
+# stops an LLM call firing on every single signal in a fast-moving
+# incident (see the design spec).
+def _run_incident_recovery_once(db: Session) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+    incidents = (
+        db.query(Incident)
+        .filter(Incident.status != "resolved")
+        .filter(or_(Incident.recovery_generated_at.is_(None), Incident.recovery_generated_at < cutoff))
+        .all()
+    )
+    for incident in incidents:
+        try:
+            signals = db.query(IncidentSignal).filter(IncidentSignal.incident_id == incident.id).order_by(IncidentSignal.created_at.asc()).all()
+            if not signals:
+                continue
+            has_new_signal = incident.recovery_generated_at is None or any(s.created_at > incident.recovery_generated_at for s in signals)
+            if not has_new_signal:
+                continue
+
+            guidance = _generate_incident_recovery_guidance(incident, signals)
+            incident.recovery_suggestion = (
+                f"{guidance['likely_cause']} Suggested: {'; '.join(guidance['suggested_actions'])}"
+                if guidance["suggested_actions"] else guidance["likely_cause"]
+            )
+            incident.recovery_suggestion_json = guidance
+            incident.recovery_generated_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"[incident-recovery] failed generating guidance for incident {incident.id}: {e}")
+
+
+# Per-signal-type "is this still an active problem" check, used only by
+# automation mode's auto-resolve pass below. A kill_switch signal is
+# always considered cleared — a halt is a discrete past event (the
+# session already stopped, and halts latch permanently), not an ongoing
+# condition, so it never blocks an incident from auto-resolving.
+def _incident_signal_cleared(db: Session, signal: "IncidentSignal") -> bool:
+    if signal.source_type == "trace_flag":
+        flag = db.get(TraceFlag, signal.source_id)
+        return flag is None or flag.resolved_at is not None
+    if signal.source_type == "kill_switch":
+        return True
+    if signal.source_type == "alert_rule":
+        rule = db.get(AlertRule, signal.source_id)
+        if rule is None:
+            return True
+        return not _evaluate_alert_rule(rule, db).triggered
+    return True
+
+
+# Bookkeeping-only automation (see the design spec's automation-scope
+# decision): auto-acknowledge already happens synchronously in
+# _attach_incident_signal at creation time. This pass handles the other
+# half — auto-resolving once every attached signal individually clears.
+# Never touches anything about what an agent is allowed to do.
+def _run_incident_automation_once(db: Session) -> None:
+    incidents = (
+        db.query(Incident)
+        .join(Project, Project.id == Incident.project_id)
+        .filter(Incident.status != "resolved", Project.incident_automation_enabled.is_(True))
+        .all()
+    )
+    for incident in incidents:
+        try:
+            signals = db.query(IncidentSignal).filter(IncidentSignal.incident_id == incident.id).all()
+            if signals and all(_incident_signal_cleared(db, s) for s in signals):
+                incident.status = "resolved"
+                incident.resolved_at = datetime.now(timezone.utc)
+                incident.resolved_note = "Auto-resolved: every underlying signal cleared."
+                db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"[incident-automation] failed processing incident {incident.id}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Alert webhook notifications — a background loop that POSTs a JSON payload
 # to any enabled rule's webhook_url when it's triggered, reusing
@@ -3562,6 +3702,35 @@ async def _alert_notification_loop():
             print(f"[alert-notifications] loop iteration failed: {e}")
         finally:
             db.close()
+
+        # Phase 3: incident correlation/recovery/automation share this same
+        # 60s tick rather than adding new background loops. Each pass opens
+        # its own session and is independently try/excepted so one failing
+        # pass can't block the others.
+        db = SessionLocal()
+        try:
+            await asyncio.to_thread(_run_incident_correlation_once, db)
+        except Exception as e:
+            print(f"[incident-correlation] loop iteration failed: {e}")
+        finally:
+            db.close()
+
+        db = SessionLocal()
+        try:
+            await asyncio.to_thread(_run_incident_automation_once, db)
+        except Exception as e:
+            print(f"[incident-automation] loop iteration failed: {e}")
+        finally:
+            db.close()
+
+        db = SessionLocal()
+        try:
+            await asyncio.to_thread(_run_incident_recovery_once, db)
+        except Exception as e:
+            print(f"[incident-recovery] loop iteration failed: {e}")
+        finally:
+            db.close()
+
         await asyncio.sleep(_ALERT_NOTIFICATION_INTERVAL_SECONDS)
 
 
