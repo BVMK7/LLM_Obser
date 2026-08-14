@@ -259,7 +259,14 @@ every signal attach, and not on auto-resolve.
   `_attach_incident_signal`'s SAVEPOINT-based signal insert (so the
   resulting `IntegrityError` isn't misattributed to a fingerprint
   collision), which is more surgery than this v1 warrants. Known
-  limitation, not a correctness bug in the common case.
+  limitation, not a correctness bug in the common case. One specific
+  sub-case: because the new-incident row is `flush()`ed *before* the
+  signal insert's own SAVEPOINT, a fingerprint collision on that signal
+  (realistically only reachable via concurrent `alert_rule` correlation —
+  its fingerprint is minute-bucketed, so two racing loop ticks for the
+  same rule can collide) rolls back the signal but leaves the already-
+  flushed, signal-less incident to be committed anyway. A narrow race,
+  same root cause as the rest of this limitation.
 
 ## Testing plan
 
