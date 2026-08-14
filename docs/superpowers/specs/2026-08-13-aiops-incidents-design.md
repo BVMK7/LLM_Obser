@@ -245,6 +245,21 @@ every signal attach, and not on auto-resolve.
   minutes of each other) — the `(project_id, category, non-resolved)`
   grouping is deliberately simpler for v1; can be revisited if it proves
   too coarse in practice.
+- **Enforcing "one non-terminal incident per (project, category)" under
+  concurrency.** The lookup-then-insert in `_attach_incident_signal` has no
+  lock and no unique constraint behind it (`idx_incidents_open_lookup` is a
+  plain, non-unique partial index) — two truly concurrent signals for the
+  same project+category (e.g. two simultaneous `POST /guardrails/check`
+  calls) can each find no open incident and each create one, producing a
+  split incident with signals scattered across both records. The
+  `order_by(opened_at.desc())` lookup means later signals converge on the
+  newest one, which limits the damage but doesn't prevent it. A real fix
+  (a unique partial index on `incidents(project_id, category) WHERE status
+  != 'resolved'`) is deliberately deferred: it would need to land alongside
+  `_attach_incident_signal`'s SAVEPOINT-based signal insert (so the
+  resulting `IntegrityError` isn't misattributed to a fingerprint
+  collision), which is more surgery than this v1 warrants. Known
+  limitation, not a correctness bug in the common case.
 
 ## Testing plan
 
