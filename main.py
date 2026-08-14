@@ -617,9 +617,11 @@ def _attach_incident_signal(db: Session, project_id, category: str, source_type:
     )
     is_new_incident = incident is None
     if incident is None:
+        automated = project.incident_automation_enabled
         incident = Incident(
             project_id=project_id, category=category, severity=severity,
-            status="acknowledged" if project.incident_automation_enabled else "open",
+            status="acknowledged" if automated else "open",
+            acknowledged_at=datetime.now(timezone.utc) if automated else None,
         )
         db.add(incident)
         db.flush()  # populate incident.id before the FK reference below
@@ -630,14 +632,22 @@ def _attach_incident_signal(db: Session, project_id, category: str, source_type:
         incident_id=incident.id, source_type=source_type, source_id=source_id,
         reason=reason, fingerprint=_incident_signal_fingerprint(source_type, source_id),
     )
-    db.add(signal)
+    # A SAVEPOINT (nested transaction), not a bare commit — db.commit() would
+    # flush and finalize EVERYTHING pending in the caller's session, and a
+    # bare "except IntegrityError: rollback" would assume the only possible
+    # violation is this function's own fingerprint constraint, silently
+    # discarding any of the caller's own pending writes that happened to
+    # violate a constraint too. Isolating this insert in its own savepoint
+    # means only this function's own insert is rolled back on conflict.
     try:
-        db.commit()
+        with db.begin_nested():
+            db.add(signal)
+            db.flush()
     except IntegrityError:
         # Same fingerprint already recorded (a race between two callers) —
         # whichever call actually landed already did everything needed.
-        db.rollback()
         return None
+    db.commit()
 
     if is_new_incident and project.incident_webhook_url:
         _send_incident_webhook(project.incident_webhook_url, {
@@ -1750,10 +1760,13 @@ def _create_trace_flag(db: Session, trace: "Trace", source: str, reason: str, se
     flag = TraceFlag(trace_id=trace.id, source=source, severity=severity, reason=reason)
     db.add(flag)
     _sync_trace_flag_summary(db, trace)  # flushes — flag.id is populated by the time this returns
-    _attach_incident_signal(
-        db, trace.project_id, category=_FLAG_SOURCE_CATEGORY[source],
-        source_type="trace_flag", source_id=flag.id, severity=severity, reason=reason,
-    )
+    try:
+        _attach_incident_signal(
+            db, trace.project_id, category=_FLAG_SOURCE_CATEGORY[source],
+            source_type="trace_flag", source_id=flag.id, severity=severity, reason=reason,
+        )
+    except Exception as e:
+        print(f"[incidents] failed to correlate signal: {e}")
     return flag
 
 
@@ -1939,7 +1952,10 @@ def _compute_session_status(db: Session, project: Project, session_id: uuid.UUID
                 "elapsed_seconds": elapsed_seconds,
                 "halted_at": datetime.now(timezone.utc).isoformat(),
             })
-        _attach_incident_signal(db, project.id, category="safety", source_type="kill_switch", source_id=halt.id, severity="high", reason=reason_text)
+        try:
+            _attach_incident_signal(db, project.id, category="safety", source_type="kill_switch", source_id=halt.id, severity="high", reason=reason_text)
+        except Exception as e:
+            print(f"[incidents] failed to correlate signal: {e}")
     except IntegrityError:
         # Two concurrent calls both crossed the threshold and both tried to
         # insert the halt row — re-read whichever one actually landed rather
@@ -3545,7 +3561,7 @@ def _run_incident_correlation_once(db: Session) -> None:
 # plus concrete next steps. Same client/fence-strip-then-json.loads
 # convention _explain_error already uses. Never auto-executed — see the
 # design spec's "recovery stays advisory" decision.
-def _generate_incident_recovery_guidance(incident: "Incident", signals: list) -> dict:
+def _generate_incident_recovery_guidance(incident: "Incident", signals: list) -> Optional[dict]:
     call_groq = PROVIDERS["groq"]
     signal_lines = "\n".join(f"- ({s.source_type}) {s.reason}" for s in signals)
     prompt = (
@@ -3568,7 +3584,12 @@ def _generate_incident_recovery_guidance(incident: "Incident", signals: list) ->
             "confidence": confidence,
         }
     except Exception as e:
-        return {"likely_cause": f"(Couldn't generate a suggestion: {e})", "suggested_actions": [], "confidence": "low"}
+        # A transient failure (Groq down, bad JSON, ...) must NOT be cached
+        # as if it were real guidance — return None so the caller leaves
+        # recovery_generated_at untouched and retries fresh next tick,
+        # exactly like a signal that hasn't been processed yet.
+        print(f"[incident-recovery] guidance generation failed for incident {incident.id}: {e}")
+        return None
 
 
 # Regenerates for any non-resolved incident that either has never had
@@ -3576,12 +3597,16 @@ def _generate_incident_recovery_guidance(incident: "Incident", signals: list) ->
 # recovery_generated_at is more than 5 minutes old — the rate limit that
 # stops an LLM call firing on every single signal in a fast-moving
 # incident (see the design spec).
+_INCIDENT_RECOVERY_BATCH_SIZE = 20  # per poll — bounds LLM calls/tick, same precedent as _ONLINE_SCORING_BATCH_SIZE
+
+
 def _run_incident_recovery_once(db: Session) -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
     incidents = (
         db.query(Incident)
         .filter(Incident.status != "resolved")
         .filter(or_(Incident.recovery_generated_at.is_(None), Incident.recovery_generated_at < cutoff))
+        .limit(_INCIDENT_RECOVERY_BATCH_SIZE)
         .all()
     )
     for incident in incidents:
@@ -3594,6 +3619,11 @@ def _run_incident_recovery_once(db: Session) -> None:
                 continue
 
             guidance = _generate_incident_recovery_guidance(incident, signals)
+            if guidance is None:
+                # Transient failure — leave recovery_generated_at untouched
+                # so this incident is retried fresh next tick instead of
+                # being permanently poisoned by a cached error string.
+                continue
             incident.recovery_suggestion = (
                 f"{guidance['likely_cause']} Suggested: {'; '.join(guidance['suggested_actions'])}"
                 if guidance["suggested_actions"] else guidance["likely_cause"]
@@ -3783,19 +3813,27 @@ async def _alert_notification_loop():
         finally:
             db.close()
 
-        db = SessionLocal()
-        try:
-            await asyncio.to_thread(_run_incident_automation_once, db)
-        except Exception as e:
-            print(f"[incident-automation] loop iteration failed: {e}")
-        finally:
-            db.close()
-
+        # Recovery guidance runs BEFORE automation's auto-resolve: automation
+        # can auto-acknowledge AND auto-resolve an incident within the same
+        # tick it opens (e.g. kill_switch signals, which _incident_signal_
+        # cleared always treats as already-cleared). If automation ran
+        # first, that incident would resolve before recovery ever saw it —
+        # the recovery query filters to status != "resolved" — and it would
+        # never receive guidance at all. Running recovery first guarantees
+        # even a same-tick auto-resolved incident got guidance first.
         db = SessionLocal()
         try:
             await asyncio.to_thread(_run_incident_recovery_once, db)
         except Exception as e:
             print(f"[incident-recovery] loop iteration failed: {e}")
+        finally:
+            db.close()
+
+        db = SessionLocal()
+        try:
+            await asyncio.to_thread(_run_incident_automation_once, db)
+        except Exception as e:
+            print(f"[incident-automation] loop iteration failed: {e}")
         finally:
             db.close()
 

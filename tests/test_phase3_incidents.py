@@ -175,6 +175,7 @@ def test_recovery_guidance_populated_within_one_loop_tick(api_headers):
         time.sleep(3)
 
     assert detail["recovery_suggestion"] is not None
+    assert not detail["recovery_suggestion"].startswith("(Couldn't generate")
     assert detail["recovery_suggestion_json"] is not None
     assert set(detail["recovery_suggestion_json"].keys()) == {"likely_cause", "suggested_actions", "confidence"}
     assert detail["recovery_suggestion_json"]["confidence"] in ("low", "medium", "high")
