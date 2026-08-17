@@ -17,6 +17,7 @@ import {
   DocumentationIcon,
   AgentsIcon,
   PoliciesIcon,
+  IncidentsIcon,
 } from "./icons";
 
 const navSections = [
@@ -28,6 +29,7 @@ const navSections = [
       { to: "/review", label: "Review Queue", icon: <ReviewIcon /> },
       { to: "/alerts", label: "Alerts", icon: <AlertsIcon /> },
       { to: "/policies", label: "Policies", icon: <PoliciesIcon /> },
+      { to: "/incidents", label: "Incidents", icon: <IncidentsIcon /> },
     ],
   },
   {

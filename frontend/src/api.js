@@ -301,3 +301,11 @@ export const getPolicies = () => request("/policies", { errorMessage: "Failed to
 export const createPolicy = (payload) => request("/policies", { method: "POST", body: payload, errorMessage: "Failed to create policy" });
 export const updatePolicy = (id, payload) => request(`/policies/${id}`, { method: "PUT", body: payload, errorMessage: "Failed to update policy" });
 export const deletePolicy = (id) => request(`/policies/${id}`, { method: "DELETE", errorMessage: "Failed to delete policy" });
+
+// Incidents (Phase 3) — correlates AlertRule triggers, trace_flags, and
+// kill-switch halts into one incident per (project, category). No
+// createIncident here: incidents are always system-correlated, never
+// manually created.
+export const getIncidents = (params) => request("/incidents", { params, errorMessage: "Failed to load incidents" });
+export const getIncident = (id) => request(`/incidents/${id}`, { errorMessage: "Failed to load incident" });
+export const updateIncident = (id, payload) => request(`/incidents/${id}`, { method: "PATCH", body: payload, errorMessage: "Failed to update incident" });

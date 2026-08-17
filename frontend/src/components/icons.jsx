@@ -222,6 +222,17 @@ export function PoliciesIcon(props) {
   );
 }
 
+// Sidebar nav item for the Incidents page — a heartbeat/pulse line,
+// standing in for correlated signals (alert rules, flags, kill-switch
+// halts) converging into one thing to watch.
+export function IncidentsIcon(props) {
+  return (
+    <IconBase {...props}>
+      <path d="M2 12h4l2-7 4 14 3-10 2 3h5" />
+    </IconBase>
+  );
+}
+
 // Sidebar nav item for the Agents page — three connected nodes, standing in
 // for multiple agents coordinating (memory/messages/cost all revolve around
 // more than one named agent).
