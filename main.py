@@ -3147,6 +3147,7 @@ def _run_online_scoring_once(db: Session) -> None:
 
 async def _online_scoring_loop():
     while True:
+        tick_start = time.perf_counter()
         db = SessionLocal()
         try:
             await asyncio.to_thread(_run_online_scoring_once, db)
@@ -3154,6 +3155,7 @@ async def _online_scoring_loop():
             print(f"[online-scoring] loop iteration failed: {e}")
         finally:
             db.close()
+            record_loop_tick("online_scoring", time.perf_counter() - tick_start)
         await asyncio.sleep(_ONLINE_SCORING_INTERVAL_SECONDS)
 
 
@@ -3823,6 +3825,7 @@ async def _run_alert_notifications_once(db: Session) -> None:
 
 async def _alert_notification_loop():
     while True:
+        tick_start = time.perf_counter()
         db = SessionLocal()
         try:
             await _run_alert_notifications_once(db)
@@ -3830,11 +3833,13 @@ async def _alert_notification_loop():
             print(f"[alert-notifications] loop iteration failed: {e}")
         finally:
             db.close()
+            record_loop_tick("alert_notifications", time.perf_counter() - tick_start)
 
         # Phase 3: incident correlation/recovery/automation share this same
         # 60s tick rather than adding new background loops. Each pass opens
         # its own session and is independently try/excepted so one failing
         # pass can't block the others.
+        tick_start = time.perf_counter()
         db = SessionLocal()
         try:
             await asyncio.to_thread(_run_incident_correlation_once, db)
@@ -3842,6 +3847,7 @@ async def _alert_notification_loop():
             print(f"[incident-correlation] loop iteration failed: {e}")
         finally:
             db.close()
+            record_loop_tick("incident_correlation", time.perf_counter() - tick_start)
 
         # Recovery guidance runs BEFORE automation's auto-resolve: automation
         # can auto-acknowledge AND auto-resolve an incident within the same
@@ -3851,6 +3857,7 @@ async def _alert_notification_loop():
         # the recovery query filters to status != "resolved" — and it would
         # never receive guidance at all. Running recovery first guarantees
         # even a same-tick auto-resolved incident got guidance first.
+        tick_start = time.perf_counter()
         db = SessionLocal()
         try:
             await asyncio.to_thread(_run_incident_recovery_once, db)
@@ -3858,7 +3865,9 @@ async def _alert_notification_loop():
             print(f"[incident-recovery] loop iteration failed: {e}")
         finally:
             db.close()
+            record_loop_tick("incident_recovery", time.perf_counter() - tick_start)
 
+        tick_start = time.perf_counter()
         db = SessionLocal()
         try:
             await asyncio.to_thread(_run_incident_automation_once, db)
@@ -3866,6 +3875,7 @@ async def _alert_notification_loop():
             print(f"[incident-automation] loop iteration failed: {e}")
         finally:
             db.close()
+            record_loop_tick("incident_automation", time.perf_counter() - tick_start)
 
         await asyncio.sleep(_ALERT_NOTIFICATION_INTERVAL_SECONDS)
 
