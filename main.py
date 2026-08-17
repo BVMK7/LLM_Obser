@@ -1110,12 +1110,6 @@ app = FastAPI(lifespan=lifespan)
 # the local dev server — can be allow-listed without a code change); falls
 # back to the local dev server if unset.
 _frontend_origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_frontend_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Request-level metrics for GET /metrics below. Route label is the matched
 # route TEMPLATE (e.g. "/traces/{trace_id}"), never the raw requested path
@@ -1124,16 +1118,60 @@ app.add_middleware(
 # backend's cardinality. A request that never matches a real route (a 404
 # on a made-up path) gets a fixed "unmatched" label instead of its raw
 # path, so hitting random URLs can't be used to spam new label series.
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    start = time.perf_counter()
-    response = await call_next(request)
-    duration = time.perf_counter() - start
-    route = request.scope.get("route")
-    route_label = route.path if route else "unmatched"
-    REQUEST_COUNT.labels(method=request.method, route=route_label, status_code=response.status_code).inc()
-    REQUEST_LATENCY.labels(method=request.method, route=route_label).observe(duration)
-    return response
+#
+# Deliberately a pure ASGI middleware, NOT the @app.middleware("http")
+# decorator (which is Starlette's BaseHTTPMiddleware under the hood) — that
+# wraps `receive` in a way that silently breaks Request.is_disconnected()
+# under a cancelled scope, which would have broken the pre-existing GET
+# /sessions/{session_id}/stream SSE endpoint's early-disconnect handling
+# (an abandoned browser tab would then hold its DB session open for the
+# full 10-minute cap instead of a couple of seconds). Passing `receive`
+# straight through here avoids that entirely. The try/finally also means
+# an unhandled exception (a real 500) still gets counted, which
+# BaseHTTPMiddleware would have let propagate around uncounted.
+_KNOWN_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
+
+
+class PrometheusMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start = time.perf_counter()
+        status_holder = {"code": 500}  # unhandled exception below => 500
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status_holder["code"] = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            route = scope.get("route")
+            route_label = getattr(route, "path", None) or "unmatched"
+            method_label = scope["method"] if scope["method"] in _KNOWN_HTTP_METHODS else "other"
+            REQUEST_COUNT.labels(method=method_label, route=route_label, status_code=status_holder["code"]).inc()
+            REQUEST_LATENCY.labels(method=method_label, route=route_label).observe(time.perf_counter() - start)
+
+
+# PrometheusMiddleware is registered BEFORE CORSMiddleware so that, per
+# Starlette's middleware stacking (the LAST middleware added ends up
+# OUTERMOST), CORS ends up outermost and can short-circuit a preflight
+# OPTIONS request before it ever reaches our middleware — otherwise every
+# CORS preflight would get recorded under route="unmatched", polluting
+# that label with ordinary traffic instead of real 404s.
+app.add_middleware(PrometheusMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_frontend_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # GET /metrics — standard Prometheus scrape target. No auth: matches how

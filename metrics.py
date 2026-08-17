@@ -13,7 +13,8 @@ REQUEST_COUNT = Counter(
     "http_requests_total", "Total HTTP requests", ["method", "route", "status_code"]
 )
 REQUEST_LATENCY = Histogram(
-    "http_request_duration_seconds", "HTTP request latency in seconds", ["method", "route"]
+    "http_request_duration_seconds", "HTTP request latency in seconds", ["method", "route"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, float("inf")),
 )
 
 # Health of each named background-loop tick — see record_loop_tick below
