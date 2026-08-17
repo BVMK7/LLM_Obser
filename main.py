@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import uuid
@@ -19,7 +20,7 @@ from urllib.parse import urlparse
 import bcrypt
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, Header, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
@@ -29,6 +30,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
 from providers import PROVIDERS, MODEL_CATALOG, estimate_cost, estimate_cost_from_total_tokens
+from metrics import REQUEST_COUNT, REQUEST_LATENCY, record_loop_tick
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 ProviderName = Literal["gemini", "groq", "openrouter"]
 
@@ -1113,6 +1116,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request-level metrics for GET /metrics below. Route label is the matched
+# route TEMPLATE (e.g. "/traces/{trace_id}"), never the raw requested path
+# — labeling by raw path would let real trace/session UUIDs become
+# distinct Prometheus label values, the classic way to blow up a metrics
+# backend's cardinality. A request that never matches a real route (a 404
+# on a made-up path) gets a fixed "unmatched" label instead of its raw
+# path, so hitting random URLs can't be used to spam new label series.
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    route = request.scope.get("route")
+    route_label = route.path if route else "unmatched"
+    REQUEST_COUNT.labels(method=request.method, route=route_label, status_code=response.status_code).inc()
+    REQUEST_LATENCY.labels(method=request.method, route=route_label).observe(duration)
+    return response
+
+
+# GET /metrics — standard Prometheus scrape target. No auth: matches how
+# every Prometheus/Kubernetes-style metrics endpoint works (scrapers don't
+# send per-target credentials), and nothing exposed here carries customer
+# data (route names, status codes, loop timestamps only).
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # ---------------------------------------------------------------------------
