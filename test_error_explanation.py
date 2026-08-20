@@ -34,7 +34,7 @@ def trigger_real_llm_error():
 
     try:
         bad_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b",
             messages=[{"role": "user", "content": "This call should fail."}],
         )
         # If we somehow get here, the "bad" key didn't fail — that's unexpected,

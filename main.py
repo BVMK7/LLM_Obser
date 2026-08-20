@@ -264,7 +264,7 @@ class Trace(Base):
     ended_at = Column(DateTime(timezone=True))
     total_tokens = Column(Integer)
     cost = Column(Numeric(10, 6))
-    # Which literal model string was used (e.g. "llama-3.1-8b-instant") — set
+    # Which literal model string was used (e.g. "openai/gpt-oss-20b") — set
     # by Playground (see run_playground below); NULL for older rows and
     # anything posted directly to POST /traces without one.
     model = Column(String)

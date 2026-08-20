@@ -80,7 +80,7 @@ def call_gemini(messages, model="gemini-3.5-flash", temperature=None, top_p=None
     return answer, usage.prompt_token_count, usage.candidates_token_count
 
 
-def call_groq(messages, model="llama-3.1-8b-instant", temperature=None, top_p=None):
+def call_groq(messages, model="openai/gpt-oss-20b", temperature=None, top_p=None):
     from groq import Groq
 
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
@@ -154,8 +154,20 @@ MODEL_CATALOG = {
         "models": ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
     },
     "groq": {
-        "default": "llama-3.1-8b-instant",
-        "models": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
+        # llama-3.1-8b-instant/llama-3.3-70b-versatile: fully removed from
+        # Groq's catalog as of 2026-08-18 (confirmed via GET
+        # /openai/v1/models against this app's own key — both now 404
+        # model_not_found, not just an access-tier restriction). gpt-oss-
+        # 20b/-120b are confirmed live and confirmed end-to-end against
+        # this app's actual prompt patterns: a plain "respond with exactly
+        # one word" instruction (the deterministic test scorers/guardrails
+        # rely on this) and a "respond with ONLY a JSON object" structured
+        # prompt (_explain_error/_generate_incident_recovery_guidance) —
+        # both models cleanly return a bare word or parseable JSON with no
+        # extra chatter, unlike qwen/qwen3.6-27b, which was also tried and
+        # wraps replies in extra formatting.
+        "default": "openai/gpt-oss-20b",
+        "models": ["openai/gpt-oss-20b", "openai/gpt-oss-120b"],
     },
     "openrouter": {
         "default": "google/gemma-4-26b-a4b-it:free",
@@ -175,8 +187,11 @@ MODEL_CATALOG = {
 PRICING = {
     "gemini-3.5-flash": {"input": 1.50, "output": 9.00},
     "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50},
-    "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
-    "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
+    # llama-3.1-8b-instant/llama-3.3-70b-versatile removed 2026-08-18 (see
+    # MODEL_CATALOG above) — replaced by gpt-oss-20b/-120b, confirmed
+    # 2026-08-18 against groq.com's published rates.
+    "openai/gpt-oss-20b": {"input": 0.075, "output": 0.30},
+    "openai/gpt-oss-120b": {"input": 0.15, "output": 0.60},
     # OpenRouter's ":free" models are genuinely free — not a fallback estimate.
     "google/gemma-4-26b-a4b-it:free": {"input": 0.0, "output": 0.0},
     "google/gemma-4-31b-it:free": {"input": 0.0, "output": 0.0},
