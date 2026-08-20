@@ -3603,7 +3603,16 @@ def _evaluate_alert_rule(rule: AlertRule, db: Session) -> AlertStatus:
 # don't gate each other.
 def _run_incident_correlation_once(db: Session) -> None:
     rules = db.query(AlertRule).filter(AlertRule.enabled.is_(True)).all()
-    for rule in rules:
+    # Captured up front, before any per-rule commit() below can expire these
+    # ORM objects (SQLAlchemy's default expire_on_commit=True) -- a
+    # concurrent delete of one rule's row (e.g. a test's project-teardown
+    # cascade) mid-batch would otherwise make even `rule.id` itself raise
+    # ObjectDeletedError once the instance is expired and its row is gone,
+    # which would crash the except block's own logging line below and
+    # escape uncaught instead of being logged and skipped like every other
+    # per-item failure here.
+    rule_ids = [rule.id for rule in rules]
+    for rule, rule_id in zip(rules, rule_ids):
         try:
             status = _evaluate_alert_rule(rule, db)
             if not status.triggered:
@@ -3623,7 +3632,7 @@ def _run_incident_correlation_once(db: Session) -> None:
             db.commit()
         except Exception as e:
             db.rollback()
-            print(f"[incident-correlation] failed processing rule {rule.id}: {e}")
+            print(f"[incident-correlation] failed processing rule {rule_id}: {e}")
 
 
 # Advisory recovery guidance — one Groq call per incident, synthesizing
@@ -3679,7 +3688,16 @@ def _run_incident_recovery_once(db: Session) -> None:
         .limit(_INCIDENT_RECOVERY_BATCH_SIZE)
         .all()
     )
-    for incident in incidents:
+    # Captured up front, before any per-incident commit() below can expire
+    # these ORM objects (SQLAlchemy's default expire_on_commit=True) -- a
+    # concurrent delete of one incident's row (e.g. a test's project-
+    # teardown cascade) mid-batch would otherwise make even `incident.id`
+    # itself raise ObjectDeletedError once the instance is expired and its
+    # row is gone, which crashed the except block's own logging line below
+    # and escaped uncaught (killing the rest of this tick's batch) instead
+    # of being logged and skipped like any other per-incident failure here.
+    incident_ids = [incident.id for incident in incidents]
+    for incident, incident_id in zip(incidents, incident_ids):
         try:
             signals = db.query(IncidentSignal).filter(IncidentSignal.incident_id == incident.id).order_by(IncidentSignal.created_at.asc()).all()
             if not signals:
@@ -3703,7 +3721,7 @@ def _run_incident_recovery_once(db: Session) -> None:
             db.commit()
         except Exception as e:
             db.rollback()
-            print(f"[incident-recovery] failed generating guidance for incident {incident.id}: {e}")
+            print(f"[incident-recovery] failed generating guidance for incident {incident_id}: {e}")
 
 
 # Per-signal-type "is this still an active problem" check, used only by
@@ -3737,7 +3755,14 @@ def _run_incident_automation_once(db: Session) -> None:
         .filter(Incident.status != "resolved", Project.incident_automation_enabled.is_(True))
         .all()
     )
-    for incident in incidents:
+    # Captured up front, before any per-incident commit() below can expire
+    # these ORM objects (SQLAlchemy's default expire_on_commit=True) -- see
+    # the identical comment in _run_incident_recovery_once for why reading
+    # `incident.id` on an already-expired, already-deleted instance would
+    # otherwise crash the except block's own logging line and escape
+    # uncaught.
+    incident_ids = [incident.id for incident in incidents]
+    for incident, incident_id in zip(incidents, incident_ids):
         try:
             signals = db.query(IncidentSignal).filter(IncidentSignal.incident_id == incident.id).all()
             if signals and all(_incident_signal_cleared(db, s) for s in signals):
@@ -3747,7 +3772,7 @@ def _run_incident_automation_once(db: Session) -> None:
                 db.commit()
         except Exception as e:
             db.rollback()
-            print(f"[incident-automation] failed processing incident {incident.id}: {e}")
+            print(f"[incident-automation] failed processing incident {incident_id}: {e}")
 
 
 # ---------------------------------------------------------------------------
