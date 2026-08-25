@@ -46,10 +46,14 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS otel_collector_url TEXT;
 
 ALTER TABLE traces ADD COLUMN IF NOT EXISTS otel_exported_at TIMESTAMPTZ;
 -- NULL means "not yet exported." Set the moment this trace's export POST
--- succeeds — this is what makes the export loop idempotent: a trace only
--- stays eligible while this is NULL, so a retried tick (or a POST
--- failure that's naturally retried forever) can never send the same
--- trace twice.
+-- succeeds — a trace only stays eligible while this is NULL, so under
+-- normal operation a retried tick (or a POST failure that's naturally
+-- retried forever) exports each trace once. Delivery is at-least-once,
+-- not exactly-once (a crash between a successful POST and this column's
+-- commit could cause a re-send), but a re-send is harmless: every
+-- exported trace/span ID is deterministic, so a collector keying on
+-- (traceId, spanId) treats it as an idempotent overwrite, not a
+-- duplicate.
 ```
 
 ## Trace → OTel span mapping
@@ -80,9 +84,18 @@ Attributes:
   explicit "OK").
 - **Resource**: `service.name` = the project's `name`.
 
-This is a full-fidelity mapping of what this app already tracks, not a
-summary — nothing about the original trace/span data is lossy, it's
-just re-shaped into OTel's span/attribute vocabulary.
+This mapping is not fully lossless. Three things about the original
+trace/span data are not reflected in the exported copy:
+
+- This app's own `Span.parent_span_id` hierarchy (nested spans within a
+  trace) is flattened — every child span is parented directly to the
+  trace's root span in the export, regardless of its real parent span
+  within this app.
+- `Trace.input`/`Trace.output` are not exported at all.
+- `Score` rows are not exported at all.
+
+Everything else it does carry over is re-shaped into OTel's
+span/attribute vocabulary rather than summarized.
 
 ## Eligibility rule
 
@@ -100,23 +113,30 @@ protect.
 
 ## Export mechanism
 
-One HTTP POST per project per tick, containing every eligible trace (up
-to the batch cap) as one OTLP `resourceSpans` payload — not one POST per
-trace, since batching per project per tick is both cheaper and the
-natural unit OTLP's payload shape already expects (`resourceSpans` →
-`scopeSpans` → `spans[]`, many spans per request).
+One HTTP POST per eligible trace per tick, each containing that one
+trace's root span plus all of its child spans as one OTLP
+`resourceSpans` payload — not one batched POST per project. Each trace
+is committed (`otel_exported_at` stamped) independently, immediately
+after its own successful POST, so one bad trace (a malformed payload, a
+collector-side rejection) can never block or roll back any other
+trace's export in the same tick's batch — better failure isolation than
+a single all-or-nothing batched request, at the cost of more requests
+per tick.
 
 1. Query every `Project` with `otel_collector_url IS NOT NULL`.
 2. For each, query its eligible traces (the rule above), capped at
    `_OTEL_EXPORT_BATCH_SIZE = 100` per project per tick — same "bound the
    work per tick" precedent as every other loop in this app. A project
    with a bigger backlog just keeps shrinking it over later ticks.
-3. Build the OTLP JSON payload and POST it (5s timeout, via `httpx`,
-   same shape as the kill-switch/incident webhook senders).
-4. On success, stamp `otel_exported_at = now()` on every trace just
-   sent. On failure (network error, non-2xx), leave the marker unset —
-   those traces are simply retried on the next tick, forever. No
-   backoff: the batch cap already bounds the cost of a stuck collector.
+3. For each eligible trace, build its OTLP JSON payload and POST it (5s
+   timeout, via `httpx`, same shape as the kill-switch/incident webhook
+   senders).
+4. On success, stamp that trace's `otel_exported_at = now()` and commit
+   immediately, before moving on to the next trace. On failure (network
+   error, non-2xx), leave the marker unset — that trace is simply
+   retried on the next tick, forever, without affecting any other trace.
+   No backoff: the batch cap already bounds the cost of a stuck
+   collector.
 
 ## Trigger: a new background loop
 

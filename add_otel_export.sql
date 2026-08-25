@@ -8,3 +8,4 @@
 
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS otel_collector_url TEXT;
 ALTER TABLE traces ADD COLUMN IF NOT EXISTS otel_exported_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_traces_otel_pending ON traces(project_id) WHERE otel_exported_at IS NULL;

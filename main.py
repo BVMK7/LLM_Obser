@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, exists, func, or_
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import IntegrityError
@@ -293,10 +293,16 @@ class Trace(Base):
     # Existing callers/integrations are unaffected either way.
     agent_id = Column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), index=True)
     # Set the moment this trace's OTel export POST succeeds (see
-    # _run_otel_export_once below) — NULL means "not yet exported." This is
-    # what makes the export loop idempotent: a trace is only ever eligible
-    # while this stays NULL, so a retried tick (or a POST failure that's
-    # naturally retried forever) can never send the same trace twice.
+    # _run_otel_export_once below) — NULL means "not yet exported." A trace
+    # is only ever eligible while this stays NULL, so under normal
+    # operation a retried tick (or a POST failure that's naturally retried
+    # forever) exports each trace once. Delivery is still at-least-once,
+    # not exactly-once: a crash or failure between a successful POST and
+    # this column's commit could cause a re-send. That's harmless rather
+    # than a duplicate, because every exported trace/span ID is fully
+    # deterministic (see _otel_root_span/_otel_child_span) — a collector
+    # keying on (traceId, spanId) treats a re-send as an idempotent
+    # overwrite of the same span, not a new one.
     otel_exported_at = Column(DateTime(timezone=True))
 
     # Lets us access trace.spans / trace.scores in Python; SQLAlchemy loads
@@ -1444,6 +1450,13 @@ class ProjectUpdate(BaseModel):
     incident_automation_enabled: Optional[bool] = None
     retention_days: Optional[int] = Field(default=None, ge=1)
     otel_collector_url: Optional[str] = None
+
+    @field_validator("otel_collector_url")
+    @classmethod
+    def _otel_collector_url_must_be_http(cls, v):
+        if v is not None and urlparse(v).scheme not in ("http", "https"):
+            raise ValueError("otel_collector_url must be an http(s) URL")
+        return v
 
 
 # PATCH /projects/{project_id} — rename and/or set kill-switch thresholds.
@@ -3997,6 +4010,17 @@ def _otel_root_span(trace: "Trace") -> dict:
     return span
 
 
+# Caps how many characters of a span's input/output get sent to the
+# collector. Unbounded values are a poison-pill vector for the collector's
+# own storage/parsing — this bound applies only to the exported OTLP copy;
+# this app's own dashboard/API still show the full, untruncated value.
+_OTEL_ATTR_MAX_LEN = 4096
+
+
+def _otel_truncate(value: str) -> str:
+    return value if len(value) <= _OTEL_ATTR_MAX_LEN else value[:_OTEL_ATTR_MAX_LEN]
+
+
 # One child span per Span row, nested under the trace's root span via
 # parentSpanId. status is only set when this row actually errored — an
 # unset span.error means "no explicit status," which OTLP collectors treat
@@ -4004,9 +4028,9 @@ def _otel_root_span(trace: "Trace") -> dict:
 def _otel_child_span(trace: "Trace", span: "Span") -> dict:
     attributes = [{"key": "step_name", "value": {"stringValue": span.step_name}}]
     if span.input is not None:
-        attributes.append({"key": "input", "value": {"stringValue": span.input}})
+        attributes.append({"key": "input", "value": {"stringValue": _otel_truncate(span.input)}})
     if span.output is not None:
-        attributes.append({"key": "output", "value": {"stringValue": span.output}})
+        attributes.append({"key": "output", "value": {"stringValue": _otel_truncate(span.output)}})
     if span.failure_category is not None:
         attributes.append({"key": "failure_category", "value": {"stringValue": span.failure_category}})
 
@@ -4018,10 +4042,12 @@ def _otel_child_span(trace: "Trace", span: "Span") -> dict:
         "startTimeUnixNano": _otel_unix_nano(span.started_at),
         "attributes": attributes,
     }
-    if span.ended_at is not None:
-        result["endTimeUnixNano"] = _otel_unix_nano(span.ended_at)
+    result["endTimeUnixNano"] = _otel_unix_nano(span.ended_at if span.ended_at is not None else span.started_at)
     if span.error:
-        result["status"] = {"code": "STATUS_CODE_ERROR", "message": span.error_explanation}
+        status = {"code": "STATUS_CODE_ERROR"}
+        if span.error_explanation is not None:
+            status["message"] = span.error_explanation
+        result["status"] = status
     return result
 
 
@@ -4094,6 +4120,7 @@ def _run_otel_export_once(db: Session) -> None:
                     Trace.ended_at.isnot(None),
                     Trace.otel_exported_at.is_(None),
                 )
+                .order_by(Trace.ended_at)
                 .limit(_OTEL_EXPORT_BATCH_SIZE)
                 .all()
             )
@@ -4102,6 +4129,16 @@ def _run_otel_export_once(db: Session) -> None:
             # this plain value, never trace.id, so a POST failure's log
             # line can never itself raise ObjectDeletedError.
             trace_ids = [trace.id for trace in eligible]
+            # Ends the read transaction the query above opened before the
+            # per-trace loop below makes up to _OTEL_EXPORT_BATCH_SIZE
+            # sequential network calls (up to ~500s at the 5s httpx
+            # timeout) — nothing after this point depends on that
+            # transaction staying open: trace_ids is already a plain list,
+            # and every other read (trace.spans, trace.session_id, etc.)
+            # below simply triggers a fresh SQLAlchemy load if needed.
+            # This does not delete/detach the `eligible` ORM objects, it
+            # only ends their transaction.
+            db.rollback()
             for trace, trace_id in zip(eligible, trace_ids):
                 try:
                     payload = _build_otel_export_payload(project_name, trace)
