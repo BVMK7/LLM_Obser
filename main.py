@@ -101,6 +101,13 @@ class Project(Base):
     # above. A background sweep archives-then-deletes traces older than
     # this many days, once they have no unresolved trace_flags.
     retention_days = Column(Integer)
+    # OpenTelemetry export (push-only) — NULL means disabled. When set, the
+    # otel export background loop POSTs newly-completed traces to this OTLP/
+    # HTTP-JSON collector endpoint as they finish, same "NULL means off"
+    # convention as kill_switch_webhook_url/incident_webhook_url above. This
+    # app never ingests OTLP; it only ever POSTs out to whatever collector
+    # this URL points at.
+    otel_collector_url = Column(Text)
 
 
 # An ApiKey authenticates a request as belonging to one Project. Only the
@@ -285,6 +292,12 @@ class Trace(Base):
     # passed agent_name (see TraceCreate.agent_name / _get_or_create_agent).
     # Existing callers/integrations are unaffected either way.
     agent_id = Column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), index=True)
+    # Set the moment this trace's OTel export POST succeeds (see
+    # _run_otel_export_once below) — NULL means "not yet exported." This is
+    # what makes the export loop idempotent: a trace is only ever eligible
+    # while this stays NULL, so a retried tick (or a POST failure that's
+    # naturally retried forever) can never send the same trace twice.
+    otel_exported_at = Column(DateTime(timezone=True))
 
     # Lets us access trace.spans / trace.scores in Python; SQLAlchemy loads
     # them with a second query the first time they're accessed.
@@ -1108,6 +1121,7 @@ class ProjectResponse(BaseModel):
     incident_webhook_url: Optional[str] = None
     incident_automation_enabled: bool = False
     retention_days: Optional[int] = None
+    otel_collector_url: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1131,6 +1145,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_online_scoring_loop()),
         asyncio.create_task(_alert_notification_loop()),
         asyncio.create_task(_retention_sweep_loop()),
+        asyncio.create_task(_otel_export_loop()),
     ]
     try:
         yield
@@ -1428,6 +1443,7 @@ class ProjectUpdate(BaseModel):
     incident_webhook_url: Optional[str] = None
     incident_automation_enabled: Optional[bool] = None
     retention_days: Optional[int] = Field(default=None, ge=1)
+    otel_collector_url: Optional[str] = None
 
 
 # PATCH /projects/{project_id} — rename and/or set kill-switch thresholds.
@@ -3932,6 +3948,193 @@ async def _retention_sweep_loop():
             db.close()
             record_loop_tick("retention_sweep", time.perf_counter() - tick_start)
         await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry export — a background loop that POSTs each newly-completed,
+# not-yet-exported trace (plus its spans) to a per-project OTLP/HTTP JSON
+# collector endpoint, as one root span (the trace) with the trace's own
+# spans as its children. Export-only: this app never accepts OTLP itself,
+# it only ever POSTs out. See `lifespan` for how this loop is started/
+# stopped — same shape as _retention_sweep_loop above, just a 60s interval
+# instead of 24h, since near-real-time visibility is the point here.
+# ---------------------------------------------------------------------------
+
+def _otel_unix_nano(dt: datetime) -> str:
+    # OTLP JSON encodes int64 fields (including *UnixNano timestamps) as
+    # strings, not JSON numbers, since JS/JSON numbers can't losslessly
+    # hold a 64-bit nanosecond timestamp.
+    return str(int(dt.timestamp() * 1_000_000_000))
+
+
+# The trace's own OTel root span — not a separate DB row, so it reuses the
+# trace's own id.hex[:16] truncation for its span_id (see the plan's ID
+# derivation rule). Attributes are only the trace-level fields the design
+# calls out; any that are NULL on this trace are simply omitted rather than
+# sent as a null attribute value.
+def _otel_root_span(trace: "Trace") -> dict:
+    attributes = []
+    if trace.session_id is not None:
+        attributes.append({"key": "session_id", "value": {"stringValue": str(trace.session_id)}})
+    if trace.agent_id is not None:
+        attributes.append({"key": "agent_id", "value": {"stringValue": str(trace.agent_id)}})
+    if trace.model is not None:
+        attributes.append({"key": "model", "value": {"stringValue": trace.model}})
+    if trace.total_tokens is not None:
+        attributes.append({"key": "total_tokens", "value": {"intValue": str(trace.total_tokens)}})
+    if trace.cost is not None:
+        attributes.append({"key": "cost", "value": {"doubleValue": float(trace.cost)}})
+
+    span = {
+        "traceId": trace.id.hex,
+        "spanId": trace.id.hex[:16],
+        "name": trace.name,
+        "startTimeUnixNano": _otel_unix_nano(trace.started_at),
+        "attributes": attributes,
+    }
+    if trace.ended_at is not None:
+        span["endTimeUnixNano"] = _otel_unix_nano(trace.ended_at)
+    return span
+
+
+# One child span per Span row, nested under the trace's root span via
+# parentSpanId. status is only set when this row actually errored — an
+# unset span.error means "no explicit status," which OTLP collectors treat
+# as STATUS_CODE_UNSET, the correct default for a step that never failed.
+def _otel_child_span(trace: "Trace", span: "Span") -> dict:
+    attributes = [{"key": "step_name", "value": {"stringValue": span.step_name}}]
+    if span.input is not None:
+        attributes.append({"key": "input", "value": {"stringValue": span.input}})
+    if span.output is not None:
+        attributes.append({"key": "output", "value": {"stringValue": span.output}})
+    if span.failure_category is not None:
+        attributes.append({"key": "failure_category", "value": {"stringValue": span.failure_category}})
+
+    result = {
+        "traceId": trace.id.hex,
+        "spanId": span.id.hex[:16],
+        "parentSpanId": trace.id.hex[:16],
+        "name": span.step_name,
+        "startTimeUnixNano": _otel_unix_nano(span.started_at),
+        "attributes": attributes,
+    }
+    if span.ended_at is not None:
+        result["endTimeUnixNano"] = _otel_unix_nano(span.ended_at)
+    if span.error:
+        result["status"] = {"code": "STATUS_CODE_ERROR", "message": span.error_explanation}
+    return result
+
+
+# Builds the full OTLP/HTTP JSON request body for ONE trace. project_name is
+# passed as a plain string (not the Project ORM object) so this function
+# never needs to touch a possibly-expired Project instance — the caller
+# (_run_otel_export_once) already captured it up front per the
+# capture-before-commit discipline. trace.spans triggers SQLAlchemy's lazy
+# load the first time it's accessed, same as every other read of this
+# relationship elsewhere in this file.
+def _build_otel_export_payload(project_name: str, trace: "Trace") -> dict:
+    spans = [_otel_root_span(trace)]
+    spans.extend(_otel_child_span(trace, span) for span in trace.spans)
+    return {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": project_name}},
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {"name": "llm-observability"},
+                        "spans": spans,
+                    }
+                ],
+            }
+        ]
+    }
+
+
+# Synchronous POST to the collector — same shape as _send_kill_switch_webhook
+# above: httpx.Client (never `requests`, which is test-only in this repo),
+# 5s timeout, raise_for_status, bare print-based error logging (no
+# structured logger exists anywhere in this file). Returns True/False rather
+# than raising, so the caller decides what "failed" means for
+# otel_exported_at (see _run_otel_export_once).
+def _send_otel_export(url: str, payload: dict) -> bool:
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.post(url, json=payload)
+            resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[otel-export] POST to {url!r} failed: {e}")
+        return False
+
+
+# Bounds work per project per tick — same precedent as
+# _RETENTION_SWEEP_BATCH_SIZE/_ONLINE_SCORING_BATCH_SIZE. A project with a
+# bigger backlog than this just keeps shrinking it over later ticks.
+_OTEL_EXPORT_BATCH_SIZE = 100
+
+
+def _run_otel_export_once(db: Session) -> None:
+    projects = db.query(Project).filter(Project.otel_collector_url.isnot(None)).all()
+    # Captured up front, before any per-trace commit() below can expire
+    # these ORM objects (SQLAlchemy's default expire_on_commit=True) — same
+    # capture-before-commit discipline as _run_retention_sweep_once. Project
+    # NAME is captured here too (not just id/url) so _build_otel_export_payload
+    # never has to read project.name off a possibly-expired instance.
+    project_infos = [(project.id, project.otel_collector_url, project.name) for project in projects]
+    for project_id, collector_url, project_name in project_infos:
+        try:
+            eligible = (
+                db.query(Trace)
+                .filter(
+                    Trace.project_id == project_id,
+                    Trace.ended_at.isnot(None),
+                    Trace.otel_exported_at.is_(None),
+                )
+                .limit(_OTEL_EXPORT_BATCH_SIZE)
+                .all()
+            )
+            # Captured up front, before this loop's own per-trace commit()
+            # can expire these ORM objects — the except block below logs
+            # this plain value, never trace.id, so a POST failure's log
+            # line can never itself raise ObjectDeletedError.
+            trace_ids = [trace.id for trace in eligible]
+            for trace, trace_id in zip(eligible, trace_ids):
+                try:
+                    payload = _build_otel_export_payload(project_name, trace)
+                    if _send_otel_export(collector_url, payload):
+                        trace.otel_exported_at = datetime.now(timezone.utc)
+                        db.commit()
+                    # On failure, otel_exported_at is left unset (NULL) — this
+                    # same trace is naturally retried on the next 60s tick,
+                    # forever. No backoff needed: the batch cap above already
+                    # bounds how much repeated work a stuck collector can cost.
+                except Exception as e:
+                    db.rollback()
+                    print(f"[otel-export] failed exporting trace {trace_id}: {e}")
+        except Exception as e:
+            db.rollback()
+            print(f"[otel-export] failed processing project {project_id}: {e}")
+
+
+_OTEL_EXPORT_INTERVAL_SECONDS = 60  # near-real-time visibility is the point — unlike the 24h retention sweep
+
+
+async def _otel_export_loop():
+    while True:
+        tick_start = time.perf_counter()
+        db = SessionLocal()
+        try:
+            await asyncio.to_thread(_run_otel_export_once, db)
+        except Exception as e:
+            print(f"[otel-export] loop iteration failed: {e}")
+        finally:
+            db.close()
+            record_loop_tick("otel_export", time.perf_counter() - tick_start)
+        await asyncio.sleep(_OTEL_EXPORT_INTERVAL_SECONDS)
 
 
 # ---------------------------------------------------------------------------
