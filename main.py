@@ -288,8 +288,17 @@ class Trace(Base):
 
     # Lets us access trace.spans / trace.scores in Python; SQLAlchemy loads
     # them with a second query the first time they're accessed.
-    spans = relationship("Span", order_by="Span.started_at")
-    scores = relationship("Score", order_by="Score.created_at")
+    # passive_deletes="all": without it, SQLAlchemy's unit-of-work tries to
+    # UPDATE each child's trace_id to NULL before deleting the parent (its
+    # default "nullify" cascade for a plain one-to-many), which violates
+    # spans.trace_id/scores.trace_id's NOT NULL constraint. Plain
+    # passive_deletes=True only skips that for collections the ORM never
+    # loaded — _archive_trace's snapshot build loads trace.spans/scores
+    # first, so "all" is required to defer those already-loaded children to
+    # Postgres' own ON DELETE CASCADE too (see the FK definitions below),
+    # which is what _archive_trace's db.delete(trace) already assumes.
+    spans = relationship("Span", order_by="Span.started_at", passive_deletes="all")
+    scores = relationship("Score", order_by="Score.created_at", passive_deletes="all")
 
 
 # One row per flag EVENT on a trace — replaces cramming every flag into
