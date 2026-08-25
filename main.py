@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, exists, func, or_
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import IntegrityError
@@ -1419,7 +1419,7 @@ class ProjectUpdate(BaseModel):
     kill_switch_webhook_url: Optional[str] = None
     incident_webhook_url: Optional[str] = None
     incident_automation_enabled: Optional[bool] = None
-    retention_days: Optional[int] = None
+    retention_days: Optional[int] = Field(default=None, ge=1)
 
 
 # PATCH /projects/{project_id} — rename and/or set kill-switch thresholds.
@@ -1888,19 +1888,35 @@ def _build_trace_archive_snapshot(db: Session, trace: "Trace") -> dict:
 
 
 # Archives then deletes ONE trace, in a single transaction — the caller
-# (the sweep in Task 3) is responsible for having already confirmed
-# eligibility (ended, no open trace_flags); this function just does the
-# work. db.delete(trace) relies on the existing ON DELETE CASCADE on
-# spans.trace_id/scores.trace_id/trace_flags.trace_id (Postgres-level,
-# not an ORM-level cascade) to remove the trace's children.
-def _archive_trace(db: Session, trace: "Trace") -> None:
+# (the sweep in Task 3) is responsible for having already confirmed the
+# ended/age eligibility criteria; this function double-checks the
+# open-flags invariant itself (see below) since that one can change
+# between the batch query and this call. db.delete(trace) relies on the
+# existing ON DELETE CASCADE on spans.trace_id/scores.trace_id/
+# trace_flags.trace_id (Postgres-level, not an ORM-level cascade) to
+# remove the trace's children. Returns True if the trace was actually
+# archived, False if a race meant it wasn't (safe to just retry next tick).
+def _archive_trace(db: Session, trace: "Trace") -> bool:
     snapshot = _build_trace_archive_snapshot(db, trace)
+    # Re-check the "no open flags" invariant right before committing, using
+    # the snapshot's own trace_flags list already loaded in this same
+    # transaction (free — no extra query). The batch query in
+    # _run_retention_sweep_once checked this once when it selected this
+    # trace, but a flag can be created concurrently (a guardrail check, a
+    # human flagging it) between that query and this commit — without this
+    # re-check, such a flag would be deleted while still unresolved, which
+    # is exactly the "evidence deleted, not genuinely resolved" scenario
+    # rule 3 of the eligibility rule exists to prevent.
+    if any(f["resolved_at"] is None for f in snapshot["trace_flags"]):
+        db.rollback()
+        return False
     db.add(ArchivedTrace(
         id=trace.id, project_id=trace.project_id,
         original_started_at=trace.started_at, data=snapshot,
     ))
     db.delete(trace)
     db.commit()
+    return True
 
 
 # Rule-based anomaly detection — cheap, pure-SQL heuristics (no LLM call),
@@ -3847,39 +3863,50 @@ _RETENTION_SWEEP_BATCH_SIZE = 200
 
 
 def _run_retention_sweep_once(db: Session) -> None:
+    # Hoisted out of the per-project loop — identical on every iteration
+    # (trace ids are unique, so this doesn't need to be project-scoped).
+    trace_ids_with_open_flags = (
+        db.query(TraceFlag.trace_id).filter(TraceFlag.resolved_at.is_(None)).distinct().subquery()
+    )
     projects = db.query(Project).filter(Project.retention_days.isnot(None)).all()
-    for project in projects:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=project.retention_days)
-        # Same "trace_ids_with_open_flags" subquery idiom GET /traces/flagged
-        # already uses — traces with at least one unresolved flag are the
-        # ones this sweep must never touch (see the design spec's
-        # eligibility rule and the IncidentSignal integrity gap it closes).
-        trace_ids_with_open_flags = (
-            db.query(TraceFlag.trace_id).filter(TraceFlag.resolved_at.is_(None)).distinct().subquery()
-        )
-        eligible = (
-            db.query(Trace)
-            .filter(
-                Trace.project_id == project.id,
-                Trace.ended_at.isnot(None),
-                Trace.started_at < cutoff,
-                ~Trace.id.in_(db.query(trace_ids_with_open_flags)),
+    # Captured up front, before any per-trace commit() inside the loop
+    # below can expire these ORM objects (SQLAlchemy's default
+    # expire_on_commit=True) — a later project's own attribute access
+    # (retention_days, id) would otherwise trigger a refresh that can
+    # raise ObjectDeletedError if that project was deleted concurrently,
+    # the same failure class already fixed once in the incident loops
+    # (commit 4ed8384).
+    project_infos = [(project.id, project.retention_days) for project in projects]
+    for project_id, retention_days in project_infos:
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            eligible = (
+                db.query(Trace)
+                .filter(
+                    Trace.project_id == project_id,
+                    Trace.ended_at.isnot(None),
+                    Trace.started_at < cutoff,
+                    ~Trace.id.in_(db.query(trace_ids_with_open_flags)),
+                )
+                .limit(_RETENTION_SWEEP_BATCH_SIZE)
+                .all()
             )
-            .limit(_RETENTION_SWEEP_BATCH_SIZE)
-            .all()
-        )
-        # Captured up front, before any per-trace commit() below can expire
-        # these ORM objects (SQLAlchemy's default expire_on_commit=True) —
-        # same fix already applied to the incident background passes: an
-        # exception's own logging line re-reading an expired instance's
-        # attributes would otherwise itself raise and escape uncaught.
-        trace_ids = [trace.id for trace in eligible]
-        for trace, trace_id in zip(eligible, trace_ids):
-            try:
-                _archive_trace(db, trace)
-            except Exception as e:
-                db.rollback()
-                print(f"[retention-sweep] failed archiving trace {trace_id}: {e}")
+            # Captured up front, before any per-trace commit() below can
+            # expire these ORM objects (SQLAlchemy's default
+            # expire_on_commit=True) — same fix already applied to the
+            # incident background passes: an exception's own logging line
+            # re-reading an expired instance's attributes would otherwise
+            # itself raise and escape uncaught.
+            trace_ids = [trace.id for trace in eligible]
+            for trace, trace_id in zip(eligible, trace_ids):
+                try:
+                    _archive_trace(db, trace)
+                except Exception as e:
+                    db.rollback()
+                    print(f"[retention-sweep] failed archiving trace {trace_id}: {e}")
+        except Exception as e:
+            db.rollback()
+            print(f"[retention-sweep] failed processing project {project_id}: {e}")
 
 
 _RETENTION_SWEEP_INTERVAL_SECONDS = 86400  # 24h — archival doesn't need near-real-time responsiveness

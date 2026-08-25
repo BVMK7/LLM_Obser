@@ -10,7 +10,6 @@ Run with the backend + Postgres already up and migrated:
 """
 
 import os
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -36,7 +35,9 @@ def _post(path, headers, body=None):
 
 
 def _patch(path, headers, body=None):
-    return requests.patch(f"{BACKEND_URL}{path}", headers=headers, json=body or {})
+    resp = requests.patch(f"{BACKEND_URL}{path}", headers=headers, json=body or {})
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _get(path, headers):
@@ -137,3 +138,31 @@ def test_no_retention_set_never_archives(admin_headers, project, api_headers):
     still_there = _get(f"/traces/{trace['id']}", api_headers)
     assert still_there["id"] == trace["id"]
     assert _archived_row(trace["id"]) is None
+
+
+def test_trace_with_resolved_flag_gets_archived(admin_headers, project, api_headers):
+    _set_retention(admin_headers, project["id"], 1)
+
+    old_started = datetime.now(timezone.utc) - timedelta(days=5)
+    trace = _post("/traces", api_headers, {"name": "resolved_flag_old_trace", "started_at": _iso(old_started)})
+    _patch(f"/traces/{trace['id']}", api_headers, {"output": "done", "ended_at": _now_iso()})
+    _patch(f"/traces/{trace['id']}/flag", api_headers, {"flagged_for_review": True, "review_note": "needs a look"})
+    # Resolves every currently-open flag on the trace (see flag_trace's
+    # docstring comment) — a resolved flag must NOT block archival.
+    _patch(f"/traces/{trace['id']}/flag", api_headers, {"flagged_for_review": False})
+
+    db = SessionLocal()
+    try:
+        _run_retention_sweep_once(db)
+    finally:
+        db.close()
+
+    missing = requests.get(f"{BACKEND_URL}/traces/{trace['id']}", headers=api_headers)
+    assert missing.status_code == 404
+
+    row = _archived_row(trace["id"])
+    assert row is not None
+    assert str(row.project_id) == project["id"]
+    flags = row.data["trace_flags"]
+    assert len(flags) == 1
+    assert flags[0]["resolved_at"] is not None
