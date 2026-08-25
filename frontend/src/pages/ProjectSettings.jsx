@@ -34,6 +34,12 @@ function incidentDraftFrom(project) {
   };
 }
 
+function retentionDraftFrom(project) {
+  return {
+    retention_days: project.retention_days ?? "",
+  };
+}
+
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
@@ -52,6 +58,9 @@ export default function ProjectSettings() {
   const [incidentDraft, setIncidentDraft] = useState(incidentDraftFrom({}));
   const [incidentSaving, setIncidentSaving] = useState(false);
   const [incidentSaved, setIncidentSaved] = useState(false);
+  const [retentionDraft, setRetentionDraft] = useState(retentionDraftFrom({}));
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionSaved, setRetentionSaved] = useState(false);
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState([]);
   const [apiKeys, setApiKeys] = useState([]);
@@ -84,6 +93,7 @@ export default function ProjectSettings() {
         setNameDraft(project.name);
         setKillSwitchDraft(killSwitchDraftFrom(project));
         setIncidentDraft(incidentDraftFrom(project));
+        setRetentionDraft(retentionDraftFrom(project));
         setMembers(memberList);
 
         const mine = memberList.find((m) => m.user_id === user?.id);
@@ -146,6 +156,24 @@ export default function ProjectSettings() {
       .then(() => setIncidentSaved(true))
       .catch((err) => setError(err.message))
       .finally(() => setIncidentSaving(false));
+  };
+
+  // retention_days only ever controls the background archival sweep —
+  // never anything about what an agent is allowed to do, same
+  // "bookkeeping only" precedent as incident automation above.
+  const handleRetentionSave = (e) => {
+    e.preventDefault();
+    setRetentionSaving(true);
+    setRetentionSaved(false);
+    setError(null);
+    const toNumberOrNull = (v) => (v === "" ? null : Number(v));
+    updateProject(id, {
+      name: projectName,
+      retention_days: toNumberOrNull(retentionDraft.retention_days),
+    })
+      .then(() => setRetentionSaved(true))
+      .catch((err) => setError(err.message))
+      .finally(() => setRetentionSaving(false));
   };
 
   const handleInvite = (e) => {
@@ -459,6 +487,37 @@ export default function ProjectSettings() {
                 className="w-full bg-[var(--brand-primary)] text-white text-sm font-medium px-3 py-1.5 hover:opacity-90 transition-opacity disabled:opacity-50 mt-1"
               >
                 {incidentSaving ? "Saving..." : incidentSaved ? "Saved" : "Save Settings"}
+              </button>
+            </form>
+          )}
+        </div>
+
+        {/* Data Retention */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] p-4">
+          <div className="text-sm font-medium text-[var(--text-primary)] mb-1">Data Retention</div>
+          <p className="text-xs text-[var(--text-muted)] mb-3">
+            Traces older than this get archived and removed — they'll stop showing up in Overview, Performance, and
+            Cost & Usage. Leave blank to keep everything forever.
+          </p>
+          {!isAdmin ? (
+            <div className="text-xs text-[var(--text-muted)]">Only admins can view or change data retention.</div>
+          ) : (
+            <form onSubmit={handleRetentionSave} className="flex flex-col gap-2">
+              <label className="block text-xs text-[var(--text-muted)]">Keep traces for (days)</label>
+              <input
+                type="number"
+                min="1"
+                placeholder="Forever"
+                value={retentionDraft.retention_days}
+                onChange={(e) => setRetentionDraft((d) => ({ ...d, retention_days: e.target.value }))}
+                className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+              />
+              <button
+                type="submit"
+                disabled={retentionSaving}
+                className="w-full bg-[var(--brand-primary)] text-white text-sm font-medium px-3 py-1.5 hover:opacity-90 transition-opacity disabled:opacity-50 mt-1"
+              >
+                {retentionSaving ? "Saving..." : retentionSaved ? "Saved" : "Save Retention"}
               </button>
             </form>
           )}
