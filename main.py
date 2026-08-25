@@ -1113,6 +1113,7 @@ async def lifespan(app: FastAPI):
     background_tasks = [
         asyncio.create_task(_online_scoring_loop()),
         asyncio.create_task(_alert_notification_loop()),
+        asyncio.create_task(_retention_sweep_loop()),
     ]
     try:
         yield
@@ -3828,6 +3829,65 @@ def _run_incident_automation_once(db: Session) -> None:
         except Exception as e:
             db.rollback()
             print(f"[incident-automation] failed processing incident {incident_id}: {e}")
+
+
+# Bounds work per project per tick — same precedent as
+# _ONLINE_SCORING_BATCH_SIZE/_INCIDENT_RECOVERY_BATCH_SIZE. A project with
+# a bigger backlog than this just keeps shrinking it over later ticks.
+_RETENTION_SWEEP_BATCH_SIZE = 200
+
+
+def _run_retention_sweep_once(db: Session) -> None:
+    projects = db.query(Project).filter(Project.retention_days.isnot(None)).all()
+    for project in projects:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=project.retention_days)
+        # Same "trace_ids_with_open_flags" subquery idiom GET /traces/flagged
+        # already uses — traces with at least one unresolved flag are the
+        # ones this sweep must never touch (see the design spec's
+        # eligibility rule and the IncidentSignal integrity gap it closes).
+        trace_ids_with_open_flags = (
+            db.query(TraceFlag.trace_id).filter(TraceFlag.resolved_at.is_(None)).distinct().subquery()
+        )
+        eligible = (
+            db.query(Trace)
+            .filter(
+                Trace.project_id == project.id,
+                Trace.ended_at.isnot(None),
+                Trace.started_at < cutoff,
+                ~Trace.id.in_(db.query(trace_ids_with_open_flags)),
+            )
+            .limit(_RETENTION_SWEEP_BATCH_SIZE)
+            .all()
+        )
+        # Captured up front, before any per-trace commit() below can expire
+        # these ORM objects (SQLAlchemy's default expire_on_commit=True) —
+        # same fix already applied to the incident background passes: an
+        # exception's own logging line re-reading an expired instance's
+        # attributes would otherwise itself raise and escape uncaught.
+        trace_ids = [trace.id for trace in eligible]
+        for trace, trace_id in zip(eligible, trace_ids):
+            try:
+                _archive_trace(db, trace)
+            except Exception as e:
+                db.rollback()
+                print(f"[retention-sweep] failed archiving trace {trace_id}: {e}")
+
+
+_RETENTION_SWEEP_INTERVAL_SECONDS = 86400  # 24h — archival doesn't need near-real-time responsiveness
+
+
+async def _retention_sweep_loop():
+    while True:
+        tick_start = time.perf_counter()
+        db = SessionLocal()
+        try:
+            await asyncio.to_thread(_run_retention_sweep_once, db)
+        except Exception as e:
+            print(f"[retention-sweep] loop iteration failed: {e}")
+        finally:
+            db.close()
+            record_loop_tick("retention_sweep", time.perf_counter() - tick_start)
+        await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)
 
 
 # ---------------------------------------------------------------------------
