@@ -13,6 +13,19 @@ in Postgres — nothing ever removes a row. This adds a per-project,
 opt-in retention window: traces older than the window get archived (a
 compact historical snapshot) and then deleted from the live tables.
 
+**What this does and doesn't fix.** Because the archive lives in the
+same Postgres database (see the destination decision below), total row
+count and disk usage are NOT bounded by this feature — one
+`archived_traces` row replaces the several normalized rows a trace used
+to occupy, but nothing is ever deleted from Postgres for good. What this
+actually buys: a much smaller *hot* working set — `GET /traces`,
+Overview/Performance/Cost & Usage, and alert-rule evaluation all read
+only live traces, so they get faster and index bloat drops as a
+project's history grows — plus Postgres' own TOAST compression on the
+JSONB archive rows. If unbounded *disk* growth is ever the actual
+problem, that's a different feature (external cold storage, or a real
+delete-without-archiving retention tier), not this one.
+
 Four scope decisions, confirmed with the user before this was written:
 
 - **Archive first, then delete** (not a bare delete, not a soft-delete-
@@ -104,6 +117,20 @@ A trace is eligible for archival when **all** of:
    trace still sitting in the human Review Queue is never silently
    removed out from under whoever's working it.
 
+**Known consequence, accepted deliberately:** flags are only ever
+resolved by a human (`PATCH /traces/{id}/flag` or
+`.../flags/{flag_id}`) — the `anomaly` and `guardrail` sources that
+auto-create a flag never auto-resolve it. So a trace that ever tripped
+an anomaly heuristic or a guardrail check is retained **indefinitely**,
+regardless of `retention_days`, until someone clears it in the Review
+Queue. In a project with a steady anomaly/guardrail rate and an
+unattended Review Queue, this set of permanently-exempt traces grows
+without bound — this is the direct cost of rule 3's safety guarantee,
+not an oversight, but it does mean `retention_days` alone doesn't
+guarantee a bounded working set. There's currently no count or metric
+surfacing how many traces are being held back this way; that would be a
+reasonable follow-up if this proves to matter in practice.
+
 ## Archival mechanism
 
 One DB transaction per eligible trace (not one big transaction for the
@@ -146,7 +173,14 @@ responsiveness, and running it rarely keeps it cheap. Each tick:
 Gets `record_loop_tick("retention_sweep", duration)` from the
 already-shipped Prometheus work, for free — this loop's health is
 visible on `/metrics` the same way every other loop's is, with zero
-extra design needed.
+extra design needed. One caveat worth stating explicitly: every other
+instrumented loop ticks every 60 seconds, so
+`background_loop_last_run_timestamp_seconds{loop_name="retention_sweep"}`
+will legitimately be up to 24 hours stale at any given moment. A
+monitoring rule written against this metric with a generic "loop hasn't
+ticked in N minutes" threshold will permanently false-positive on this
+one label — any alert built on this metric needs a `retention_sweep`-
+specific threshold, not the same one used for the 60s-cadence loops.
 
 ## Project Settings UI
 

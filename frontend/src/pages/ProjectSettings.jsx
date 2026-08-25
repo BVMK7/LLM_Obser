@@ -497,7 +497,8 @@ export default function ProjectSettings() {
           <div className="text-sm font-medium text-[var(--text-primary)] mb-1">Data Retention</div>
           <p className="text-xs text-[var(--text-muted)] mb-3">
             Traces older than this get archived and removed — they'll stop showing up in Overview, Performance, and
-            Cost & Usage. Leave blank to keep everything forever.
+            Cost & Usage. Leave blank to keep everything forever. Traces still open in the Review Queue are never
+            removed, however old they are, until they're resolved there.
           </p>
           {!isAdmin ? (
             <div className="text-xs text-[var(--text-muted)]">Only admins can view or change data retention.</div>
