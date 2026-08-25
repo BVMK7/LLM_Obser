@@ -467,7 +467,15 @@ class Experiment(Base):
     scorer_slugs = Column(JSONB, nullable=False, server_default="[]")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
 
-    results = relationship("ExperimentResult", order_by="ExperimentResult.created_at")
+    # passive_deletes="all": without it, deleting an Experiment makes
+    # SQLAlchemy's unit-of-work auto-load this collection (even if
+    # application code never touched .results first) specifically to null
+    # out each result's experiment_id before the parent delete — which
+    # violates experiment_results.experiment_id's NOT NULL constraint.
+    # Same bug class already found and fixed on Trace.spans/Trace.scores
+    # (see _archive_trace) — this one predates that fix and is unrelated
+    # to Data Retention, just caught by the same ripple analysis.
+    results = relationship("ExperimentResult", order_by="ExperimentResult.created_at", passive_deletes="all")
 
 
 # SQLAlchemy model for the "experiment_results" table — one row per
