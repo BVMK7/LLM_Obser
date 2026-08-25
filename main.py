@@ -96,6 +96,11 @@ class Project(Base):
     # only, never anything that changes what an agent is allowed to do.
     incident_webhook_url = Column(Text)
     incident_automation_enabled = Column(Boolean, nullable=False, server_default="false")
+    # Data retention (see ArchivedTrace) — NULL means "keep forever," same
+    # convention as max_session_steps/max_session_cost/max_session_seconds
+    # above. A background sweep archives-then-deletes traces older than
+    # this many days, once they have no unresolved trace_flags.
+    retention_days = Column(Integer)
 
 
 # An ApiKey authenticates a request as belonging to one Project. Only the
@@ -304,6 +309,23 @@ class TraceFlag(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
     resolved_at = Column(DateTime(timezone=True))
     resolved_note = Column(Text)
+
+
+# One row per archived trace — see _archive_trace below. `id` is the
+# ORIGINAL trace's id (not server-generated), so an archived trace keeps
+# the same identity it always had. `data` is a full-fidelity JSONB
+# snapshot (trace + its spans + scores + trace_flags), not a summary —
+# nothing about the original is lossy, it's just collapsed from several
+# normalized rows into one. No browsing endpoint reads this table in this
+# version — it exists purely as a durable historical record.
+class ArchivedTrace(Base):
+    __tablename__ = "archived_traces"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    original_started_at = Column(DateTime(timezone=True), nullable=False)
+    archived_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    data = Column(JSONB, nullable=False)
 
 
 # SQLAlchemy model for the "spans" table — one row per step within a trace.
@@ -1068,6 +1090,7 @@ class ProjectResponse(BaseModel):
     kill_switch_webhook_url: Optional[str] = None
     incident_webhook_url: Optional[str] = None
     incident_automation_enabled: bool = False
+    retention_days: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1386,6 +1409,7 @@ class ProjectUpdate(BaseModel):
     kill_switch_webhook_url: Optional[str] = None
     incident_webhook_url: Optional[str] = None
     incident_automation_enabled: Optional[bool] = None
+    retention_days: Optional[int] = None
 
 
 # PATCH /projects/{project_id} — rename and/or set kill-switch thresholds.
@@ -1836,6 +1860,37 @@ def _create_trace_flag(db: Session, trace: "Trace", source: str, reason: str, se
     except Exception as e:
         print(f"[incidents] failed to correlate signal: {e}")
     return flag
+
+
+# Builds the full-fidelity JSONB snapshot for one trace: its own fields
+# plus nested spans/scores (via the existing TraceWithSpans schema, which
+# already bundles all three) plus trace_flags (queried separately, same
+# as every other trace_flags read in this app — Trace has no ORM
+# relationship to TraceFlag). mode="json" makes Pydantic serialize
+# datetimes/UUIDs/Decimals into plain JSON-safe values instead of Python
+# objects a JSONB column can't store directly.
+def _build_trace_archive_snapshot(db: Session, trace: "Trace") -> dict:
+    trace.status = "error" if any(span.error for span in trace.spans) else "success"
+    snapshot = TraceWithSpans.model_validate(trace).model_dump(mode="json")
+    flags = db.query(TraceFlag).filter(TraceFlag.trace_id == trace.id).order_by(TraceFlag.created_at.asc()).all()
+    snapshot["trace_flags"] = [TraceFlagResponse.model_validate(f).model_dump(mode="json") for f in flags]
+    return snapshot
+
+
+# Archives then deletes ONE trace, in a single transaction — the caller
+# (the sweep in Task 3) is responsible for having already confirmed
+# eligibility (ended, no open trace_flags); this function just does the
+# work. db.delete(trace) relies on the existing ON DELETE CASCADE on
+# spans.trace_id/scores.trace_id/trace_flags.trace_id (Postgres-level,
+# not an ORM-level cascade) to remove the trace's children.
+def _archive_trace(db: Session, trace: "Trace") -> None:
+    snapshot = _build_trace_archive_snapshot(db, trace)
+    db.add(ArchivedTrace(
+        id=trace.id, project_id=trace.project_id,
+        original_started_at=trace.started_at, data=snapshot,
+    ))
+    db.delete(trace)
+    db.commit()
 
 
 # Rule-based anomaly detection — cheap, pure-SQL heuristics (no LLM call),
