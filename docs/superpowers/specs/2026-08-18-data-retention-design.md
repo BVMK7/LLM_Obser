@@ -199,7 +199,11 @@ other suite:
   caps, since a fixture that large adds real test runtime for a
   boundary that isn't behaviorally interesting beyond "the number is
   actually applied."
-- `background_loop_last_run_timestamp_seconds{loop_name="retention_sweep"}`
-  appears on `GET /metrics` — ties the new loop into the Prometheus work
-  already shipped, verified the same way the other four loops already
-  are.
+- `record_loop_tick("retention_sweep", ...)` is called from
+  `_retention_sweep_loop`, ties the new loop into the Prometheus work
+  already shipped — verified by code inspection during task review, NOT
+  by a live poll of `GET /metrics` the way the other four loops' tests
+  do. Those loops tick every 60 seconds, so a test can wait for a real
+  tick within a reasonable timeout; this one ticks once per 24 hours,
+  which no test should ever wait for. This is a deliberate, narrower
+  verification method for this one loop, not an oversight.
