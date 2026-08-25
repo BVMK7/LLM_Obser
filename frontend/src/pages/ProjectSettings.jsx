@@ -40,6 +40,12 @@ function retentionDraftFrom(project) {
   };
 }
 
+function otelDraftFrom(project) {
+  return {
+    otel_collector_url: project.otel_collector_url ?? "",
+  };
+}
+
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
@@ -61,6 +67,9 @@ export default function ProjectSettings() {
   const [retentionDraft, setRetentionDraft] = useState(retentionDraftFrom({}));
   const [retentionSaving, setRetentionSaving] = useState(false);
   const [retentionSaved, setRetentionSaved] = useState(false);
+  const [otelDraft, setOtelDraft] = useState(otelDraftFrom({}));
+  const [otelSaving, setOtelSaving] = useState(false);
+  const [otelSaved, setOtelSaved] = useState(false);
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState([]);
   const [apiKeys, setApiKeys] = useState([]);
@@ -94,6 +103,7 @@ export default function ProjectSettings() {
         setKillSwitchDraft(killSwitchDraftFrom(project));
         setIncidentDraft(incidentDraftFrom(project));
         setRetentionDraft(retentionDraftFrom(project));
+        setOtelDraft(otelDraftFrom(project));
         setMembers(memberList);
 
         const mine = memberList.find((m) => m.user_id === user?.id);
@@ -174,6 +184,23 @@ export default function ProjectSettings() {
       .then(() => setRetentionSaved(true))
       .catch((err) => setError(err.message))
       .finally(() => setRetentionSaving(false));
+  };
+
+  // otel_collector_url is a URL (not a number), so this follows the
+  // kill-switch webhook handler's ".trim() || null" string-clearing
+  // convention, not the retention field's numeric conversion.
+  const handleOtelSave = (e) => {
+    e.preventDefault();
+    setOtelSaving(true);
+    setOtelSaved(false);
+    setError(null);
+    updateProject(id, {
+      name: projectName,
+      otel_collector_url: otelDraft.otel_collector_url.trim() || null,
+    })
+      .then(() => setOtelSaved(true))
+      .catch((err) => setError(err.message))
+      .finally(() => setOtelSaving(false));
   };
 
   const handleInvite = (e) => {
@@ -519,6 +546,37 @@ export default function ProjectSettings() {
                 className="w-full bg-[var(--brand-primary)] text-white text-sm font-medium px-3 py-1.5 hover:opacity-90 transition-opacity disabled:opacity-50 mt-1"
               >
                 {retentionSaving ? "Saving..." : retentionSaved ? "Saved" : "Save Retention"}
+              </button>
+            </form>
+          )}
+        </div>
+
+        {/* OpenTelemetry Export */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border-subtle)] p-4">
+          <div className="text-sm font-medium text-[var(--text-primary)] mb-1">OpenTelemetry Export</div>
+          <p className="text-xs text-[var(--text-muted)] mb-3">
+            When set, every newly-completed trace (and its spans) is pushed to this OTLP/HTTP collector endpoint
+            within about a minute of finishing. This app stays the system of record either way — this only sends a
+            copy out. Leave blank to disable.
+          </p>
+          {!isAdmin ? (
+            <div className="text-xs text-[var(--text-muted)]">Only admins can view or change OpenTelemetry export.</div>
+          ) : (
+            <form onSubmit={handleOtelSave} className="flex flex-col gap-2">
+              <label className="block text-xs text-[var(--text-muted)]">Collector URL</label>
+              <input
+                type="url"
+                placeholder="https://collector.example.com/v1/traces"
+                value={otelDraft.otel_collector_url}
+                onChange={(e) => setOtelDraft((d) => ({ ...d, otel_collector_url: e.target.value }))}
+                className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2 py-1.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+              />
+              <button
+                type="submit"
+                disabled={otelSaving}
+                className="w-full bg-[var(--brand-primary)] text-white text-sm font-medium px-3 py-1.5 hover:opacity-90 transition-opacity disabled:opacity-50 mt-1"
+              >
+                {otelSaving ? "Saving..." : otelSaved ? "Saved" : "Save OpenTelemetry Export"}
               </button>
             </form>
           )}
