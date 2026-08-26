@@ -520,6 +520,12 @@ class ExperimentResult(Base):
     latency_ms = Column(Integer, nullable=False, server_default="0")
     trace_id = Column(UUID(as_uuid=True), ForeignKey("traces.id", ondelete="SET NULL"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
+    # Human calibration signal (see add_experiment_result_review.sql) --
+    # NULL means "not yet reviewed." Additive only: never overwrites
+    # `passed`/`scores`, which stay the automated judgment. Set together,
+    # always both-or-neither -- never partially set.
+    human_verdict = Column(Boolean)
+    reviewed_at = Column(DateTime(timezone=True))
 
 
 # SQLAlchemy model for the "alert_rules" table — a threshold rule evaluated
@@ -1066,8 +1072,14 @@ class ExperimentResultResponse(ExperimentResultIn):
     id: uuid.UUID
     experiment_id: uuid.UUID
     created_at: datetime
+    human_verdict: Optional[bool] = None
+    reviewed_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ExperimentResultReview(BaseModel):
+    agree: bool
 
 
 class ExperimentCreate(BaseModel):
@@ -3620,6 +3632,27 @@ def get_experiment(experiment_id: uuid.UUID, db: Session = Depends(get_db), proj
     if db_experiment is None or db_experiment.project_id != project.id:
         raise HTTPException(status_code=404, detail="Experiment not found")
     return db_experiment
+
+
+@app.patch("/experiments/{experiment_id}/results/{result_id}/review", response_model=ExperimentResultResponse)
+def review_experiment_result(
+    experiment_id: uuid.UUID,
+    result_id: uuid.UUID,
+    body: ExperimentResultReview,
+    db: Session = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    experiment = db.get(Experiment, experiment_id)
+    if experiment is None or experiment.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    result = db.get(ExperimentResult, result_id)
+    if result is None or result.experiment_id != experiment_id:
+        raise HTTPException(status_code=404, detail="Experiment result not found")
+    result.human_verdict = body.agree
+    result.reviewed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(result)
+    return result
 
 
 @app.delete("/experiments/{experiment_id}")
