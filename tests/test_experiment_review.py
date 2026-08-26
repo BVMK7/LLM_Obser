@@ -11,6 +11,7 @@ must belong to the experiment named in the URL, or it's a 404.
 
 import os
 import uuid
+from datetime import datetime
 
 import requests
 
@@ -125,6 +126,40 @@ def test_review_does_not_change_passed_or_scores(api_headers):
     reviewed = next(r for r in get_resp.json()["results"] if r["id"] == result_id)
     assert reviewed["passed"] == original_passed
     assert reviewed["scores"] == original_scores
+
+
+def test_reviewing_same_result_twice_overwrites_verdict_and_timestamp(api_headers):
+    experiment = _create_experiment_with_results(api_headers)
+    experiment_id = experiment["id"]
+    result = experiment["results"][0]
+    result_id = result["id"]
+    original_passed = result["passed"]
+    original_scores = result["scores"]
+
+    first_resp = requests.patch(
+        f"{BACKEND_URL}/experiments/{experiment_id}/results/{result_id}/review",
+        headers=api_headers,
+        json={"agree": True},
+    )
+    assert first_resp.status_code == 200, first_resp.text
+    first_body = first_resp.json()
+    assert first_body["human_verdict"] is True
+    first_reviewed_at = first_body["reviewed_at"]
+    assert first_reviewed_at is not None
+
+    second_resp = requests.patch(
+        f"{BACKEND_URL}/experiments/{experiment_id}/results/{result_id}/review",
+        headers=api_headers,
+        json={"agree": False},
+    )
+    assert second_resp.status_code == 200, second_resp.text
+    second_body = second_resp.json()
+    assert second_body["human_verdict"] is False
+    assert second_body["reviewed_at"] is not None
+    assert second_body["reviewed_at"] != first_reviewed_at
+    assert datetime.fromisoformat(second_body["reviewed_at"]) > datetime.fromisoformat(first_reviewed_at)
+    assert second_body["passed"] == original_passed
+    assert second_body["scores"] == original_scores
 
 
 def test_review_result_from_different_experiment_returns_404(api_headers):

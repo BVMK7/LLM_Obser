@@ -193,6 +193,7 @@ function ReviewControl({ result, onReview, saving }) {
         onClick={() => onReview(result.id, true)}
         disabled={saving}
         title="Agree with this result"
+        aria-pressed={agreed}
         style={buttonStyle(agreed, "var(--brand-success)")}
         className="p-1 rounded-md border transition-colors disabled:opacity-40 hover:opacity-80"
       >
@@ -202,6 +203,7 @@ function ReviewControl({ result, onReview, saving }) {
         onClick={() => onReview(result.id, false)}
         disabled={saving}
         title="Disagree with this result"
+        aria-pressed={disagreed}
         style={buttonStyle(disagreed, "var(--brand-danger)")}
         className="p-1 rounded-md border transition-colors disabled:opacity-40 hover:opacity-80"
       >
@@ -418,6 +420,7 @@ export default function ExperimentDetail() {
   // that single result into local state so the row reflects it immediately
   // without refetching the whole experiment.
   const handleReview = async (resultId, agree) => {
+    setError(null);
     setSavingResultId(resultId);
     try {
       const updated = await reviewExperimentResult(id, resultId, agree);

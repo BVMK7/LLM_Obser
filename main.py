@@ -3634,6 +3634,10 @@ def get_experiment(experiment_id: uuid.UUID, db: Session = Depends(get_db), proj
     return db_experiment
 
 
+# PATCH /experiments/{experiment_id}/results/{result_id}/review — records a
+# human agree/disagree calibration signal on one result; additive only, it
+# never touches passed/scores. Ownership check is parent-then-child, same
+# shape as resolve_trace_flag: experiment 404 first, then result 404.
 @app.patch("/experiments/{experiment_id}/results/{result_id}/review", response_model=ExperimentResultResponse)
 def review_experiment_result(
     experiment_id: uuid.UUID,
