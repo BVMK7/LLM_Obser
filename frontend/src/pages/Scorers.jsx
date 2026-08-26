@@ -308,7 +308,7 @@ export default function Scorers() {
                 <>
                   <div className="text-sm font-medium text-[var(--text-primary)] mb-2">Judge Prompt</div>
                   <textarea
-                    value={detail.prompt_template}
+                    value={detail.prompt_template || ""}
                     onChange={(e) => updateField("prompt_template", e.target.value)}
                     rows={6}
                     placeholder="Use {{input}}, {{output}}, {{expected}} as placeholders"
