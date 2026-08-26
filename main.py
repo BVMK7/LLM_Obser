@@ -459,8 +459,19 @@ class Scorer(Base):
     name = Column(String, nullable=False)
     slug = Column(String, nullable=False)
     description = Column(Text)
-    prompt_template = Column(Text, nullable=False)
-    choice_scores = Column(JSONB, nullable=False, server_default="{}")
+    # "llm_judge" (default, existing behavior), "pattern_match", or
+    # "json_valid" — see _run_custom_scorer's dispatch below. Only
+    # semantically required for its own type; per-type requirements are
+    # enforced in ScorerCreate's model_validator, not here.
+    scorer_type = Column(String, nullable=False, server_default="llm_judge")
+    # Only meaningful (and only Pydantic-required) when scorer_type ==
+    # "llm_judge" — nullable since a deterministic scorer has neither.
+    prompt_template = Column(Text)
+    choice_scores = Column(JSONB, server_default="{}")
+    # Only meaningful (and only Pydantic-required) when scorer_type ==
+    # "pattern_match" — the regex or substring to look for in the answer.
+    pattern = Column(Text)
+    pattern_is_regex = Column(Boolean, nullable=False, server_default="false")
     pass_threshold = Column(Numeric, nullable=False, server_default="0.5")
     # Opt-in continuous scoring: when true, _online_scoring_loop runs this
     # scorer against new traces automatically (see below). Opt-in, not
