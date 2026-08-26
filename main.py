@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, exists, func, or_
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import IntegrityError
@@ -1008,19 +1008,46 @@ class PromptVersionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ScorerCreate/Update — a user-defined LLM-judge rubric. `prompt_template` may
-# reference {{input}}, {{output}}, {{expected}} — substituted at run time.
-# `choice_scores` maps the judge's chosen label to a 0-1 score, e.g.
-# {"Yes": 1.0, "Partially": 0.5, "No": 0.0} (mirrors Braintrust's "choice
-# scores" concept: a judge picks a label, not a raw float, which is far more
-# reliable to parse out of an LLM response than asking it for a bare number).
+# ScorerCreate/Update — a user-defined scoring rule. Three types:
+#   - "llm_judge" (default, existing behavior): `prompt_template` may
+#     reference {{input}}, {{output}}, {{expected}} — substituted at run
+#     time. `choice_scores` maps the judge's chosen label to a 0-1 score,
+#     e.g. {"Yes": 1.0, "Partially": 0.5, "No": 0.0} (mirrors Braintrust's
+#     "choice scores" concept: a judge picks a label, not a raw float,
+#     which is far more reliable to parse out of an LLM response than
+#     asking it for a bare number).
+#   - "pattern_match": deterministic, no LLM call — scores 1.0 if `pattern`
+#     is found in the answer (regex `re.search` when `pattern_is_regex`,
+#     otherwise a plain substring check), else 0.0.
+#   - "json_valid": deterministic, no LLM call — scores 1.0 if the answer
+#     parses as JSON via `json.loads`, else 0.0. No JSON Schema validation.
 class ScorerCreate(BaseModel):
     name: str
     description: Optional[str] = None
-    prompt_template: str
-    choice_scores: dict[str, float]
+    scorer_type: Literal["llm_judge", "pattern_match", "json_valid"] = "llm_judge"
+    # Required (non-None) only when scorer_type == "llm_judge" — see the
+    # model_validator below. Nullable here (not a plain `str`) because a
+    # pattern_match/json_valid scorer has no prompt at all.
+    prompt_template: Optional[str] = None
+    choice_scores: Optional[dict[str, float]] = None
+    # Required (non-empty) only when scorer_type == "pattern_match".
+    pattern: Optional[str] = None
+    pattern_is_regex: bool = False
     pass_threshold: float = 0.5
     run_online: bool = False
+
+    @model_validator(mode="after")
+    def _validate_type_specific_fields(self):
+        if self.scorer_type == "llm_judge":
+            if self.prompt_template is None or not self.prompt_template.strip():
+                raise ValueError("prompt_template is required when scorer_type is 'llm_judge'")
+            if self.choice_scores is None:
+                raise ValueError("choice_scores is required when scorer_type is 'llm_judge'")
+        elif self.scorer_type == "pattern_match":
+            if self.pattern is None or not self.pattern.strip():
+                raise ValueError("pattern is required when scorer_type is 'pattern_match'")
+        # "json_valid" needs none of prompt_template/choice_scores/pattern.
+        return self
 
 
 class ScorerResponse(ScorerCreate):
@@ -2980,16 +3007,70 @@ def _judge_answer(question: str, expected: Optional[str], answer: str) -> dict:
         return {"faithfulness": None, "relevance": None, "hallucination": None, "judge_notes": f"(judge failed: {e})"}
 
 
-# Runs one user-defined Scorer against one (question, answer, expected)
-# triple. Substitutes {{input}}/{{output}}/{{expected}} into the scorer's own
-# prompt template, asks Groq (same fixed-judge convention as _judge_answer)
-# to respond with ONLY the chosen label, then maps that label to a 0-1 score
-# via the scorer's choice_scores. An unrecognized/unparseable label returns
-# score=None rather than guessing.
 _SCORER_PLACEHOLDERS = re.compile(r"\{\{(input|output|expected)\}\}")
 
 
+# Deterministic, no LLM call: does `answer` match scorer.pattern? Regex
+# (re.search) when pattern_is_regex, else a plain substring check. Score is
+# always 1.0 (match) or 0.0 (no match) — there's no partial-credit concept
+# for a deterministic check, unlike an LLM judge's label→score mapping. An
+# invalid regex (bad pattern_is_regex=True pattern) fails gracefully with
+# score=None, the same shape _run_custom_scorer's own except block returns,
+# rather than raising and 500ing the caller. `answer` is coerced to a plain
+# string first so a None answer (however unlikely from a real provider
+# response) can never raise a TypeError out of this function the way a bare
+# `scorer.pattern in None` would.
+def _run_pattern_match_scorer(scorer: "Scorer", answer: str) -> dict:
+    answer = answer or ""
+    try:
+        if scorer.pattern_is_regex:
+            matched = re.search(scorer.pattern, answer) is not None
+        else:
+            matched = scorer.pattern in answer
+    except re.error as e:
+        return {"label": None, "score": None, "explanation": f"(invalid regex: {e})"}
+    score = 1.0 if matched else 0.0
+    label = "match" if matched else "no_match"
+    mode = "regex" if scorer.pattern_is_regex else "substring"
+    return {
+        "label": label,
+        "score": score,
+        "explanation": f"{mode} pattern {scorer.pattern!r} {'matched' if matched else 'did not match'} the output",
+    }
+
+
+# Deterministic, no LLM call: does `answer` parse as valid JSON via the
+# stdlib json module? Purely a parse success/failure check — no JSON Schema
+# validation of the parsed structure's shape. json.loads(None) raises
+# TypeError (not JSONDecodeError), which is why both exception types are
+# caught below — a None answer degrades to score=0.0 like any other
+# not-valid-JSON answer, rather than raising.
+def _run_json_valid_scorer(answer: str) -> dict:
+    try:
+        json.loads(answer)
+    except (json.JSONDecodeError, TypeError) as e:
+        return {"label": "invalid_json", "score": 0.0, "explanation": f"output is not valid JSON: {e}"}
+    return {"label": "valid_json", "score": 1.0, "explanation": "output parsed as valid JSON"}
+
+
+# Runs one user-defined Scorer against one (question, answer, expected)
+# triple. Dispatches on scorer.scorer_type:
+#   - "pattern_match"/"json_valid": deterministic, handled above, no LLM call.
+#   - "llm_judge" (default, and the only type before this dispatch existed):
+#     substitutes {{input}}/{{output}}/{{expected}} into the scorer's own
+#     prompt template, asks Groq (same fixed-judge convention as
+#     _judge_answer) to respond with ONLY the chosen label, then maps that
+#     label to a 0-1 score via the scorer's choice_scores. An unrecognized/
+#     unparseable label returns score=None rather than guessing.
+# Every branch returns the exact same {"label", "score", "explanation"}
+# shape — all three call sites (eval-case scoring, online scoring,
+# guardrail checks) depend on it.
 def _run_custom_scorer(scorer: "Scorer", question: str, answer: str, expected: Optional[str]) -> dict:
+    if scorer.scorer_type == "pattern_match":
+        return _run_pattern_match_scorer(scorer, answer)
+    if scorer.scorer_type == "json_valid":
+        return _run_json_valid_scorer(answer)
+
     call_groq = PROVIDERS["groq"]
     values = {"input": question, "output": answer, "expected": expected or "(none provided)"}
     # A single regex pass over the ORIGINAL template — substituting only the
@@ -3559,8 +3640,11 @@ def update_scorer(scorer_id: uuid.UUID, scorer: ScorerCreate, db: Session = Depe
 
     db_scorer.name = scorer.name
     db_scorer.description = scorer.description
+    db_scorer.scorer_type = scorer.scorer_type
     db_scorer.prompt_template = scorer.prompt_template
     db_scorer.choice_scores = scorer.choice_scores
+    db_scorer.pattern = scorer.pattern
+    db_scorer.pattern_is_regex = scorer.pattern_is_regex
     db_scorer.pass_threshold = scorer.pass_threshold
     db_scorer.run_online = scorer.run_online
     db.commit()
