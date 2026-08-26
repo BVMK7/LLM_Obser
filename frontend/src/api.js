@@ -245,6 +245,16 @@ export const deleteExperiment = (id) => request(`/experiments/${id}`, { method: 
 export const analyzeExperiment = (id, payload = {}) =>
   request(`/experiments/${id}/analyze`, { method: "POST", body: payload, errorMessage: "Analysis failed" });
 
+// Human-in-the-loop review of a saved experiment result — records whether a
+// person agrees with the recorded pass/fail/score outcome (human_verdict),
+// independent of the automated scorers.
+export const reviewExperimentResult = (experimentId, resultId, agree) =>
+  request(`/experiments/${experimentId}/results/${resultId}/review`, {
+    method: "PATCH",
+    body: { agree },
+    errorMessage: "Failed to save review",
+  });
+
 export const getAlertRules = () => request("/alert-rules", { errorMessage: "Failed to load alert rules" });
 export const createAlertRule = (payload) => request("/alert-rules", { method: "POST", body: payload, errorMessage: "Failed to create alert rule" });
 export const updateAlertRule = (id, payload) => request(`/alert-rules/${id}`, { method: "PUT", body: payload, errorMessage: "Failed to update alert rule" });

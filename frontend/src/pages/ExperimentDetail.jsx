@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { diffWords } from "diff";
-import { getExperiment, getExperiments, analyzeExperiment } from "../api";
+import { getExperiment, getExperiments, analyzeExperiment, reviewExperimentResult } from "../api";
 import Skeleton from "../components/Skeleton";
 import MetricCard from "../components/MetricCard";
 import { formatCost, formatTokens, formatTimestamp, scoreKeys, aggregateByProvider } from "../utils";
@@ -158,7 +158,60 @@ function OverviewTab({ experiment, analysis, analyzing, onAnalyze, aggregates, c
   );
 }
 
-function ResultsTab({ experiment, compareExperiment, matchedRows }) {
+function ThumbsUpIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5" {...props}>
+      <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" />
+    </svg>
+  );
+}
+
+function ThumbsDownIcon(props) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5" {...props}>
+      <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17" />
+    </svg>
+  );
+}
+
+// Compact agree/disagree control for a single ExperimentResult — a human
+// verdict on the recorded outcome, independent of (and alongside) the
+// automated scores. Highlights whichever button matches result.human_verdict
+// (true → agree, false → disagree, null/undefined → neither); both buttons
+// stay clickable either way so a verdict can be flipped.
+function ReviewControl({ result, onReview, saving }) {
+  const agreed = result.human_verdict === true;
+  const disagreed = result.human_verdict === false;
+  const buttonStyle = (active, color) => ({
+    borderColor: active ? color : "var(--border-subtle)",
+    color: active ? color : "var(--text-muted)",
+    backgroundColor: active ? `color-mix(in srgb, ${color} 15%, transparent)` : "transparent",
+  });
+  return (
+    <div className="flex items-center gap-1 shrink-0">
+      <button
+        onClick={() => onReview(result.id, true)}
+        disabled={saving}
+        title="Agree with this result"
+        style={buttonStyle(agreed, "var(--brand-success)")}
+        className="p-1 rounded-md border transition-colors disabled:opacity-40 hover:opacity-80"
+      >
+        <ThumbsUpIcon />
+      </button>
+      <button
+        onClick={() => onReview(result.id, false)}
+        disabled={saving}
+        title="Disagree with this result"
+        style={buttonStyle(disagreed, "var(--brand-danger)")}
+        className="p-1 rounded-md border transition-colors disabled:opacity-40 hover:opacity-80"
+      >
+        <ThumbsDownIcon />
+      </button>
+    </div>
+  );
+}
+
+function ResultsTab({ experiment, compareExperiment, matchedRows, onReview, savingResultId }) {
   return (
     <div>
       <div className="text-sm font-medium text-[var(--text-primary)] mb-4">
@@ -175,20 +228,23 @@ function ResultsTab({ experiment, compareExperiment, matchedRows }) {
             <div className="text-sm text-[var(--text-secondary)] mb-2">
               {b ? <DiffedAnswer before={b.answer} after={a.answer} /> : <span className="whitespace-pre-wrap">{a.answer}</span>}
             </div>
-            <div className="flex gap-4 text-xs text-[var(--text-muted)] flex-wrap">
-              {Object.entries(a.scores || {}).map(([k, v]) => (
-                <span key={k} className="capitalize">
-                  {k}: {b ? <DeltaText before={b.scores?.[k]} after={v} formatFn={pct} isPercent /> : pct(v)}
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex gap-4 text-xs text-[var(--text-muted)] flex-wrap">
+                {Object.entries(a.scores || {}).map(([k, v]) => (
+                  <span key={k} className="capitalize">
+                    {k}: {b ? <DeltaText before={b.scores?.[k]} after={v} formatFn={pct} isPercent /> : pct(v)}
+                  </span>
+                ))}
+                <span>
+                  {b ? (
+                    <DeltaText before={b.latency_ms} after={a.latency_ms} formatFn={(v) => `${Math.round(v)}ms`} higherIsBetter={false} />
+                  ) : (
+                    `${a.latency_ms}ms`
+                  )}
                 </span>
-              ))}
-              <span>
-                {b ? (
-                  <DeltaText before={b.latency_ms} after={a.latency_ms} formatFn={(v) => `${Math.round(v)}ms`} higherIsBetter={false} />
-                ) : (
-                  `${a.latency_ms}ms`
-                )}
-              </span>
-              <span>{formatTokens(a.total_tokens)} tokens</span>
+                <span>{formatTokens(a.total_tokens)} tokens</span>
+              </div>
+              <ReviewControl result={a} onReview={onReview} saving={savingResultId === a.id} />
             </div>
           </div>
         ))}
@@ -298,6 +354,7 @@ export default function ExperimentDetail() {
   const [analysis, setAnalysis] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [tab, setTab] = useState("Overview");
+  const [savingResultId, setSavingResultId] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -354,6 +411,26 @@ export default function ExperimentDetail() {
       setError(err.message);
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  // Records a human agree/disagree verdict on one saved result, then patches
+  // that single result into local state so the row reflects it immediately
+  // without refetching the whole experiment.
+  const handleReview = async (resultId, agree) => {
+    setSavingResultId(resultId);
+    try {
+      const updated = await reviewExperimentResult(id, resultId, agree);
+      setExperiment((prev) => ({
+        ...prev,
+        results: prev.results.map((r) =>
+          r.id === resultId ? { ...r, human_verdict: updated.human_verdict, reviewed_at: updated.reviewed_at } : r
+        ),
+      }));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingResultId(null);
     }
   };
 
@@ -457,7 +534,13 @@ export default function ExperimentDetail() {
           />
         )}
         {tab === "Results" && (
-          <ResultsTab experiment={experiment} compareExperiment={compareExperiment} matchedRows={matchedRows} />
+          <ResultsTab
+            experiment={experiment}
+            compareExperiment={compareExperiment}
+            matchedRows={matchedRows}
+            onReview={handleReview}
+            savingResultId={savingResultId}
+          />
         )}
         {tab === "Traces" && <TracesTab results={experiment.results} />}
         {tab === "Charts" && <ChartsTab aggregates={aggregates} allScoreKeys={scoreKeys(experiment.results)} />}
