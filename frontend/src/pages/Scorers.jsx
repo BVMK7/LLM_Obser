@@ -12,11 +12,14 @@ function draftScorer() {
     id: null,
     name: "New Scorer",
     description: "",
+    scorer_type: "llm_judge",
     prompt_template: "Question: {{input}}\nExpected: {{expected}}\nAnswer: {{output}}\n\n<criteria to judge>",
     choices: [
       { id: crypto.randomUUID(), label: "Yes", value: 1.0 },
       { id: crypto.randomUUID(), label: "No", value: 0.0 },
     ],
+    pattern: "",
+    pattern_is_regex: false,
     pass_threshold: 0.7,
   };
 }
@@ -100,7 +103,7 @@ export default function Scorers() {
     getScorer(id)
       .then((data) => {
         if (currentIdRef.current !== id) return;
-        setDetail({ ...data, choices: choiceScoresToChoices(data.choice_scores) });
+        setDetail({ ...data, choices: choiceScoresToChoices(data.choice_scores || {}) });
       })
       .catch((err) => {
         if (currentIdRef.current !== id) return;
@@ -150,25 +153,32 @@ export default function Scorers() {
   };
 
   const handleSave = async () => {
-    const { map: choice_scores, error: choicesError } = choicesToMap(detail.choices);
-    if (choicesError) {
-      setError(choicesError);
-      return;
-    }
     setSaving(true);
     setError(null);
     try {
       const payload = {
         name: detail.name,
         description: detail.description || null,
-        prompt_template: detail.prompt_template,
-        choice_scores,
+        scorer_type: detail.scorer_type,
         pass_threshold: Number(detail.pass_threshold),
       };
+      if (detail.scorer_type === "llm_judge") {
+        const { map: choice_scores, error: choicesError } = choicesToMap(detail.choices);
+        if (choicesError) {
+          setError(choicesError);
+          setSaving(false);
+          return;
+        }
+        payload.prompt_template = detail.prompt_template;
+        payload.choice_scores = choice_scores;
+      } else if (detail.scorer_type === "pattern_match") {
+        payload.pattern = detail.pattern;
+        payload.pattern_is_regex = detail.pattern_is_regex;
+      }
       const saved = detail.id ? await updateScorer(detail.id, payload) : await createScorer(payload);
       currentIdRef.current = saved.id;
       setSelectedId(saved.id);
-      setDetail({ ...saved, choices: choiceScoresToChoices(saved.choice_scores) });
+      setDetail({ ...saved, choices: choiceScoresToChoices(saved.choice_scores || {}) });
       setDirty(false);
       await refreshList();
     } catch (err) {
@@ -225,7 +235,13 @@ export default function Scorers() {
                 {s.name}
               </div>
               <div className={`text-xs mt-0.5 ${s.id === selectedId ? "text-white/70" : "text-[var(--text-muted)]"}`}>
-                {Object.keys(s.choice_scores).length} choices · {formatTimestamp(s.updated_at)}
+                {s.scorer_type === "llm_judge"
+                  ? `${Object.keys(s.choice_scores || {}).length} choices`
+                  : s.scorer_type === "pattern_match"
+                  ? "pattern match"
+                  : "JSON validity"}
+                {" · "}
+                {formatTimestamp(s.updated_at)}
               </div>
             </button>
           ))}
@@ -267,7 +283,7 @@ export default function Scorers() {
                   )}
                   <button
                     onClick={handleSave}
-                    disabled={saving || !detail.name.trim() || detail.choices.length === 0}
+                    disabled={saving || !detail.name.trim() || (detail.scorer_type === "llm_judge" && detail.choices.length === 0)}
                     className="text-xs px-3 py-1.5 rounded-lg bg-[var(--brand-primary)] text-white font-medium hover:bg-[var(--brand-primary-hover)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
                     {saving ? "Saving…" : "Save"}
@@ -275,53 +291,96 @@ export default function Scorers() {
                 </div>
               </div>
 
-              <div className="text-sm font-medium text-[var(--text-primary)] mb-2">Judge Prompt</div>
-              <textarea
-                value={detail.prompt_template}
-                onChange={(e) => updateField("prompt_template", e.target.value)}
-                rows={6}
-                placeholder="Use {{input}}, {{output}}, {{expected}} as placeholders"
-                className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] font-mono focus:outline-none focus:border-[var(--brand-primary)] mb-4"
-              />
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-[var(--text-primary)] mb-2">Scorer Type</label>
+                <select
+                  value={detail.scorer_type}
+                  onChange={(e) => updateField("scorer_type", e.target.value)}
+                  className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+                >
+                  <option value="llm_judge">LLM Judge</option>
+                  <option value="pattern_match">Pattern Match</option>
+                  <option value="json_valid">JSON Valid</option>
+                </select>
+              </div>
 
-              <div className="text-sm font-medium text-[var(--text-primary)] mb-2">
-                Choice Scores ({detail.choices.length})
-              </div>
-              <div className="flex flex-col gap-2 mb-3">
-                {detail.choices.map((c) => (
-                  <div key={c.id} className="flex gap-2 items-center">
-                    <input
-                      value={c.label}
-                      onChange={(e) => updateChoiceLabel(c.id, e.target.value)}
-                      placeholder="Label the judge must respond with"
-                      className="flex-1 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
-                    />
-                    <input
-                      type="number"
-                      min="0"
-                      max="1"
-                      step="0.1"
-                      value={c.value}
-                      onChange={(e) => updateChoiceValue(c.id, Number(e.target.value))}
-                      className="w-24 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
-                    />
-                    <button
-                      onClick={() => removeChoice(c.id)}
-                      disabled={detail.choices.length === 1}
-                      className="px-2 py-2 text-[var(--text-muted)] hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed"
-                      title="Remove choice"
-                    >
-                      ✕
-                    </button>
+              {detail.scorer_type === "llm_judge" && (
+                <>
+                  <div className="text-sm font-medium text-[var(--text-primary)] mb-2">Judge Prompt</div>
+                  <textarea
+                    value={detail.prompt_template}
+                    onChange={(e) => updateField("prompt_template", e.target.value)}
+                    rows={6}
+                    placeholder="Use {{input}}, {{output}}, {{expected}} as placeholders"
+                    className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] font-mono focus:outline-none focus:border-[var(--brand-primary)] mb-4"
+                  />
+
+                  <div className="text-sm font-medium text-[var(--text-primary)] mb-2">
+                    Choice Scores ({detail.choices.length})
                   </div>
-                ))}
-              </div>
-              <button
-                onClick={addChoice}
-                className="px-3 py-1.5 rounded-lg bg-white/5 text-[var(--text-secondary)] text-sm hover:bg-white/10 transition-colors mb-4"
-              >
-                + Add choice
-              </button>
+                  <div className="flex flex-col gap-2 mb-3">
+                    {detail.choices.map((c) => (
+                      <div key={c.id} className="flex gap-2 items-center">
+                        <input
+                          value={c.label}
+                          onChange={(e) => updateChoiceLabel(c.id, e.target.value)}
+                          placeholder="Label the judge must respond with"
+                          className="flex-1 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+                        />
+                        <input
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.1"
+                          value={c.value}
+                          onChange={(e) => updateChoiceValue(c.id, Number(e.target.value))}
+                          className="w-24 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+                        />
+                        <button
+                          onClick={() => removeChoice(c.id)}
+                          disabled={detail.choices.length === 1}
+                          className="px-2 py-2 text-[var(--text-muted)] hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Remove choice"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    onClick={addChoice}
+                    className="px-3 py-1.5 rounded-lg bg-white/5 text-[var(--text-secondary)] text-sm hover:bg-white/10 transition-colors mb-4"
+                  >
+                    + Add choice
+                  </button>
+                </>
+              )}
+
+              {detail.scorer_type === "pattern_match" && (
+                <div className="mb-4">
+                  <div className="text-sm font-medium text-[var(--text-primary)] mb-2">Pattern</div>
+                  <input
+                    value={detail.pattern || ""}
+                    onChange={(e) => updateField("pattern", e.target.value)}
+                    placeholder={detail.pattern_is_regex ? "Regex pattern, e.g. ^\\d+$" : "Substring to look for in the output"}
+                    className="w-full bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] font-mono focus:outline-none focus:border-[var(--brand-primary)] mb-2"
+                  />
+                  <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+                    <input
+                      type="checkbox"
+                      checked={detail.pattern_is_regex}
+                      onChange={(e) => updateField("pattern_is_regex", e.target.checked)}
+                    />
+                    Treat pattern as a regular expression
+                  </label>
+                </div>
+              )}
+
+              {detail.scorer_type === "json_valid" && (
+                <div className="mb-4 text-sm text-[var(--text-muted)]">
+                  No extra configuration — the output is scored 1.0 if it parses as valid JSON, 0.0 otherwise.
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-[var(--text-primary)] mb-2">
