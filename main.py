@@ -11,6 +11,7 @@ import re
 import regex
 import secrets
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import uuid
@@ -25,6 +26,7 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from scipy import stats
 from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, Numeric, ForeignKey, Boolean, UniqueConstraint, exists, func, or_
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import IntegrityError
@@ -1179,6 +1181,47 @@ class ExperimentResponse(BaseModel):
     results: list[ExperimentResultResponse]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# Statistical significance of a paired comparison between two experiments —
+# see _paired_rows/_mcnemar_test/_wilcoxon_test below. Computed fresh on
+# every request, never persisted.
+SIGNIFICANCE_ALPHA = 0.05
+LOW_POWER_THRESHOLD = 10  # n below this -> low_power=True, shown as a caveat, never hidden
+
+
+# One provider's McNemar's test result over its paired pass/fail outcomes.
+# b/c are the two discordant contingency-table cells: b = A passed, B
+# failed; c = A failed, B passed. n is the full paired-and-gradeable
+# sample (both sides have a non-null `passed`), not just b + c -- matching
+# what a reader expects "how many cases fed this test."
+class McNemarResult(BaseModel):
+    provider: str
+    n: int
+    b: int
+    c: int
+    p_value: float
+    significant: bool
+    low_power: bool
+
+
+# One (provider, scorer_key) Wilcoxon signed-rank test result over its
+# paired continuous scores. n is the count of paired rows where BOTH sides
+# have a non-null value for this specific scorer key.
+class WilcoxonResult(BaseModel):
+    provider: str
+    scorer_key: str
+    n: int
+    p_value: float
+    significant: bool
+    low_power: bool
+
+
+class ExperimentSignificanceResponse(BaseModel):
+    experiment_id: uuid.UUID
+    compare_id: uuid.UUID
+    mcnemar: list[McNemarResult]
+    wilcoxon: list[WilcoxonResult]
 
 
 # ProjectCreate/ProjectResponse — creating a project is how a new customer
@@ -3721,6 +3764,93 @@ def _experiment_pass_rate(results: list[ExperimentResult]) -> Optional[float]:
     return sum(1 for r in graded if r.passed) / len(graded)
 
 
+# Every distinct scorer key actually present across the given lists of
+# ExperimentResult rows -- mirrors frontend/src/utils.js's scoreKeys()
+# exactly (union of dict keys over all rows, not a hardcoded list), since
+# ExperimentResult.scores is a free-form JSONB map and the set of keys is
+# only knowable from the data itself.
+def _scorer_keys(*result_lists: list["ExperimentResult"]) -> list[str]:
+    keys = set()
+    for results in result_lists:
+        for r in results:
+            keys.update((r.scores or {}).keys())
+    return sorted(keys)
+
+
+# Matches each row in the PRIMARY experiment's results to its counterpart in
+# the COMPARE experiment's results by (question, provider) -- mirrors
+# frontend/src/pages/ExperimentDetail.jsx:396-404's matchedRows EXACTLY,
+# including its one-directional-lookup quirk: if the compare experiment has
+# duplicate (question, provider) rows, the lookup dict silently keeps the
+# LAST one encountered. This is a pre-existing quirk of the frontend's own
+# established pairing logic -- mirrored here on purpose, not "fixed", so
+# this endpoint's statistical tests run over the exact same pairs the
+# Results tab already visually diffs. Rows with no match are excluded.
+def _paired_rows(
+    primary_results: list["ExperimentResult"], compare_results: list["ExperimentResult"]
+) -> list[tuple["ExperimentResult", "ExperimentResult"]]:
+    compare_by_key = {}
+    for r in compare_results:
+        compare_by_key[f"{r.question}||{r.provider}"] = r
+    pairs = []
+    for a in primary_results:
+        comp = compare_by_key.get(f"{a.question}||{a.provider}")
+        if comp is not None:
+            pairs.append((a, comp))
+    return pairs
+
+
+# McNemar's test over one provider's paired pass/fail outcomes. `pairs` is
+# already filtered to rows for a single provider (a.provider == comp.provider
+# for every pair, by construction of _paired_rows's join key). See Global
+# Constraints for the exact formula -- do not change this math without
+# re-deriving it from McNemar's test's definition.
+def _mcnemar_test(pairs: list[tuple["ExperimentResult", "ExperimentResult"]]) -> dict:
+    gradeable = [(a, comp) for a, comp in pairs if a.passed is not None and comp.passed is not None]
+    n = len(gradeable)
+    b = sum(1 for a, comp in gradeable if a.passed and not comp.passed)  # A passed, B failed
+    c = sum(1 for a, comp in gradeable if not a.passed and comp.passed)  # A failed, B passed
+    discordant = b + c
+    if discordant == 0:
+        # A and B agree on every paired case -- no evidence of any
+        # difference is a valid, expected outcome, not an error. Never call
+        # the exact/chi-square math below with a zero denominator.
+        p_value = 1.0
+    elif discordant < 25:
+        p_value = stats.binomtest(min(b, c), n=discordant, p=0.5).pvalue
+    else:
+        chi2_stat = (abs(b - c) - 1) ** 2 / discordant
+        p_value = stats.chi2.sf(chi2_stat, df=1)
+    return {"n": n, "b": b, "c": c, "p_value": float(p_value)}
+
+
+# Wilcoxon signed-rank test over one (provider, scorer_key)'s paired
+# continuous scores. `pairs` is already filtered to a single provider.
+# Returns None (meaning: omit this provider/scorer combo from the response
+# entirely) only when there are zero gradeable pairs -- there is nothing
+# meaningful to report, not even a caveatable low-n result.
+def _wilcoxon_test(pairs: list[tuple["ExperimentResult", "ExperimentResult"]], scorer_key: str) -> Optional[dict]:
+    x, y = [], []
+    for a, comp in pairs:
+        av = (a.scores or {}).get(scorer_key)
+        cv = (comp.scores or {}).get(scorer_key)
+        if av is not None and cv is not None:
+            x.append(av)
+            y.append(cv)
+    n = len(x)
+    if n == 0:
+        return None
+    try:
+        _stat, p_value = stats.wilcoxon(x, y)
+    except ValueError:
+        # scipy raises ValueError when every paired difference is exactly
+        # zero (x == y for all n pairs) -- "no evidence of any difference"
+        # is a valid, expected outcome here, not an error, exactly like
+        # McNemar's discordant == 0 case above.
+        p_value = 1.0
+    return {"n": n, "p_value": float(p_value)}
+
+
 @app.get("/experiments", response_model=list[ExperimentListItem])
 def list_experiments(db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
     experiments = db.query(Experiment).filter(Experiment.project_id == project.id).order_by(Experiment.created_at.desc()).all()
@@ -3773,6 +3903,74 @@ def get_experiment(experiment_id: uuid.UUID, db: Session = Depends(get_db), proj
     if db_experiment is None or db_experiment.project_id != project.id:
         raise HTTPException(status_code=404, detail="Experiment not found")
     return db_experiment
+
+
+# GET /experiments/{experiment_id}/significance -- paired statistical
+# significance between two experiments' results, layered alongside (not
+# replacing) the unpaired aggregateByProvider deltas the frontend already
+# shows. This is the first endpoint in this app naming two independent
+# sibling resources of the identical type (every other two-ID endpoint is
+# parent-then-child), so both IDs get their own full 404 check, mirroring
+# get_experiment's own idiom above, applied twice.
+@app.get("/experiments/{experiment_id}/significance", response_model=ExperimentSignificanceResponse)
+def get_experiment_significance(
+    experiment_id: uuid.UUID,
+    compare_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    project: Project = Depends(get_current_project),
+):
+    db_experiment = db.get(Experiment, experiment_id)
+    if db_experiment is None or db_experiment.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    db_compare = db.get(Experiment, compare_id)
+    if db_compare is None or db_compare.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Comparison experiment not found")
+
+    pairs = _paired_rows(db_experiment.results, db_compare.results)
+    pairs_by_provider = defaultdict(list)
+    for a, comp in pairs:
+        pairs_by_provider[a.provider].append((a, comp))
+
+    mcnemar_results = []
+    for provider, provider_pairs in sorted(pairs_by_provider.items()):
+        result = _mcnemar_test(provider_pairs)
+        mcnemar_results.append(
+            McNemarResult(
+                provider=provider,
+                n=result["n"],
+                b=result["b"],
+                c=result["c"],
+                p_value=result["p_value"],
+                significant=result["p_value"] < SIGNIFICANCE_ALPHA,
+                low_power=result["n"] < LOW_POWER_THRESHOLD,
+            )
+        )
+
+    scorer_keys = _scorer_keys(db_experiment.results, db_compare.results)
+    wilcoxon_results = []
+    for provider, provider_pairs in sorted(pairs_by_provider.items()):
+        for key in scorer_keys:
+            result = _wilcoxon_test(provider_pairs, key)
+            if result is None:
+                continue
+            wilcoxon_results.append(
+                WilcoxonResult(
+                    provider=provider,
+                    scorer_key=key,
+                    n=result["n"],
+                    p_value=result["p_value"],
+                    significant=result["p_value"] < SIGNIFICANCE_ALPHA,
+                    low_power=result["n"] < LOW_POWER_THRESHOLD,
+                )
+            )
+
+    return ExperimentSignificanceResponse(
+        experiment_id=experiment_id,
+        compare_id=compare_id,
+        mcnemar=mcnemar_results,
+        wilcoxon=wilcoxon_results,
+    )
 
 
 # PATCH /experiments/{experiment_id}/results/{result_id}/review — records a
