@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { diffWords } from "diff";
-import { getExperiment, getExperiments, analyzeExperiment, reviewExperimentResult } from "../api";
+import { getExperiment, getExperiments, analyzeExperiment, reviewExperimentResult, getExperimentSignificance } from "../api";
 import Skeleton from "../components/Skeleton";
 import MetricCard from "../components/MetricCard";
 import { formatCost, formatTokens, formatTimestamp, scoreKeys, aggregateByProvider } from "../utils";
@@ -43,6 +43,47 @@ function DeltaText({ before, after, formatFn = (v) => v, higherIsBetter = true, 
   );
 }
 
+// Renders next to an existing DeltaText cell in the Overview comparison
+// table -- a compact p-value + significant/not-significant label, plus a
+// low-power caveat when the paired sample size is small. Always shown when
+// a result exists (never hidden below the n < 10 threshold, per the
+// approved design) -- the caveat communicates "treat this cautiously"
+// without suppressing the number itself.
+function SignificanceBadge({ result }) {
+  if (!result) return null;
+  const { p_value, significant, low_power, n } = result;
+  const pLabel = p_value < 0.001 ? "p<0.001" : `p=${p_value.toFixed(3)}`;
+  return (
+    <span className="inline-flex items-center gap-1 ml-1.5 align-middle">
+      <span
+        className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+        style={{
+          color: significant ? "var(--brand-success)" : "var(--text-muted)",
+          backgroundColor: significant
+            ? "color-mix(in srgb, var(--brand-success) 15%, transparent)"
+            : "color-mix(in srgb, var(--text-muted) 15%, transparent)",
+        }}
+        title={
+          significant
+            ? `Statistically significant difference (${pLabel}, n=${n})`
+            : `No statistically significant difference detected (${pLabel}, n=${n})`
+        }
+      >
+        {significant ? "significant" : "n.s."} {pLabel}
+      </span>
+      {low_power && (
+        <span
+          className="text-[10px] font-medium"
+          style={{ color: "var(--brand-warning)" }}
+          title={`Only ${n} paired cases fed this test -- treat this result cautiously`}
+        >
+          ⚠ n={n}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // Word-level diff between two answer strings — real character-level content
 // comparison (via the `diff` package), not a summary or guess at what changed.
 function DiffedAnswer({ before, after }) {
@@ -67,7 +108,7 @@ function DiffedAnswer({ before, after }) {
   );
 }
 
-function OverviewTab({ experiment, analysis, analyzing, onAnalyze, aggregates, compareAggregates, allScoreKeys }) {
+function OverviewTab({ experiment, analysis, analyzing, onAnalyze, aggregates, compareAggregates, allScoreKeys, significance }) {
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -115,7 +156,10 @@ function OverviewTab({ experiment, analysis, analyzing, onAnalyze, aggregates, c
                   <td className="py-2 text-[var(--text-secondary)]">{row.count}</td>
                   <td className="py-2 text-[var(--text-secondary)]">
                     {compareRow ? (
-                      <DeltaText before={compareRow.passRate} after={row.passRate} formatFn={pct} isPercent />
+                      <>
+                        <DeltaText before={compareRow.passRate} after={row.passRate} formatFn={pct} isPercent />
+                        <SignificanceBadge result={significance?.mcnemar.find((m) => m.provider === row.provider)} />
+                      </>
                     ) : (
                       pct(row.passRate)
                     )}
@@ -123,7 +167,12 @@ function OverviewTab({ experiment, analysis, analyzing, onAnalyze, aggregates, c
                   {allScoreKeys.map((k) => (
                     <td key={k} className="py-2 text-[var(--text-secondary)]">
                       {compareRow ? (
-                        <DeltaText before={compareRow.avgScores[k]} after={row.avgScores[k]} formatFn={pct} isPercent />
+                        <>
+                          <DeltaText before={compareRow.avgScores[k]} after={row.avgScores[k]} formatFn={pct} isPercent />
+                          <SignificanceBadge
+                            result={significance?.wilcoxon.find((w) => w.provider === row.provider && w.scorer_key === k)}
+                          />
+                        </>
                       ) : (
                         pct(row.avgScores[k])
                       )}
@@ -351,6 +400,7 @@ export default function ExperimentDetail() {
   const [allExperiments, setAllExperiments] = useState([]);
   const [compareId, setCompareId] = useState("");
   const [compareExperiment, setCompareExperiment] = useState(null);
+  const [significance, setSignificance] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [analysis, setAnalysis] = useState(null);
@@ -364,6 +414,7 @@ export default function ExperimentDetail() {
     setAnalysis(null);
     setCompareId("");
     setCompareExperiment(null);
+    setSignificance(null);
     setTab("Overview");
     Promise.all([getExperiment(id), getExperiments()])
       .then(([exp, list]) => {
@@ -381,6 +432,16 @@ export default function ExperimentDetail() {
     }
     getExperiment(compareId).then(setCompareExperiment).catch((err) => setError(err.message));
   }, [compareId]);
+
+  useEffect(() => {
+    if (!compareId) {
+      setSignificance(null);
+      return;
+    }
+    getExperimentSignificance(id, compareId)
+      .then(setSignificance)
+      .catch((err) => setError(err.message));
+  }, [id, compareId]);
 
   const aggregates = useMemo(() => (experiment ? aggregateByProvider(experiment.results) : []), [experiment]);
   const compareAggregates = useMemo(
@@ -534,6 +595,7 @@ export default function ExperimentDetail() {
             aggregates={aggregates}
             compareAggregates={compareAggregates}
             allScoreKeys={scoreKeys(experiment.results)}
+            significance={significance}
           />
         )}
         {tab === "Results" && (

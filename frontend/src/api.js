@@ -245,6 +245,19 @@ export const deleteExperiment = (id) => request(`/experiments/${id}`, { method: 
 export const analyzeExperiment = (id, payload = {}) =>
   request(`/experiments/${id}/analyze`, { method: "POST", body: payload, errorMessage: "Analysis failed" });
 
+// Paired statistical significance (McNemar's for pass/fail, Wilcoxon
+// signed-rank for per-scorer scores) between this experiment and
+// compareId, computed fresh server-side on every call -- see
+// GET /experiments/{id}/significance in main.py. Query param, not a second
+// path segment, since there's no existing "two sibling IDs" path precedent
+// in this app to follow (same idiom as getIncidents(params)/
+// getAgentCosts(windowMinutes)).
+export const getExperimentSignificance = (id, compareId) =>
+  request(`/experiments/${id}/significance`, {
+    params: { compare_id: compareId },
+    errorMessage: "Failed to compute significance",
+  });
+
 // Human-in-the-loop review of a saved experiment result — records whether a
 // person agrees with the recorded pass/fail/score outcome (human_verdict),
 // independent of the automated scorers.
