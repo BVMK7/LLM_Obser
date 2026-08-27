@@ -3840,14 +3840,21 @@ def _wilcoxon_test(pairs: list[tuple["ExperimentResult", "ExperimentResult"]], s
     n = len(x)
     if n == 0:
         return None
-    try:
-        _stat, p_value = stats.wilcoxon(x, y)
-    except ValueError:
-        # scipy raises ValueError when every paired difference is exactly
-        # zero (x == y for all n pairs) -- "no evidence of any difference"
-        # is a valid, expected outcome here, not an error, exactly like
-        # McNemar's discordant == 0 case above.
+    if all(xi == yi for xi, yi in zip(x, y)):
+        # scipy.stats.wilcoxon's behavior on all-zero differences is not
+        # reliable across n or scipy version -- confirmed empirically on
+        # the scipy version this app pins (1.17.1): it raises ValueError
+        # for small n, but for n >= 14 it silently returns pvalue=nan with
+        # no exception at all, which would violate this endpoint's
+        # non-Optional `p_value: float` response contract. Detect the
+        # all-equal case directly, before ever calling stats.wilcoxon, so
+        # this doesn't depend on scipy's exception behavior at all.
+        # "No evidence of any difference" is a valid, expected outcome
+        # here, not an error, exactly like McNemar's discordant == 0 case
+        # above.
         p_value = 1.0
+    else:
+        _stat, p_value = stats.wilcoxon(x, y)
     return {"n": n, "p_value": float(p_value)}
 
 
