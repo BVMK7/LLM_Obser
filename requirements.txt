@@ -13,3 +13,4 @@ streamlit
 pandas
 pytest
 prometheus-client
+regex

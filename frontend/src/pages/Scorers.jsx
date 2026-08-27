@@ -62,11 +62,13 @@ function ScorersSkeleton() {
   );
 }
 
-// A Scorer is a user-defined LLM-judge rubric: a prompt template (with
-// {{input}}/{{output}}/{{expected}} placeholders) plus a mapping from the
-// judge's chosen label to a 0-1 score. Same master-detail CRUD editor
-// pattern as Datasets/PromptLibrary — see Datasets.jsx for the stale-detail-
-// clearing / dirty-tracking rationale, reused verbatim here.
+// A Scorer is a user-defined scoring rule — either an LLM-judge rubric, or
+// a deterministic pattern-match/JSON-validity check. An LLM-judge scorer is
+// a prompt template (with {{input}}/{{output}}/{{expected}} placeholders)
+// plus a mapping from the judge's chosen label to a 0-1 score. Same
+// master-detail CRUD editor pattern as Datasets/PromptLibrary — see
+// Datasets.jsx for the stale-detail-clearing / dirty-tracking rationale,
+// reused verbatim here.
 export default function Scorers() {
   const [scorers, setScorers] = useState([]);
   const [loading, setLoading] = useState(true);

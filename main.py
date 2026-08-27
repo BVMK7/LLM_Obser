@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import regex
 import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -445,9 +446,11 @@ class PromptVersion(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default="now()")
 
 
-# SQLAlchemy model for the "scorers" table — a user-defined LLM-judge rubric:
-# a prompt template (with {{input}}/{{output}}/{{expected}} placeholders) plus
-# a mapping from the judge's chosen label to a 0-1 score.
+# SQLAlchemy model for the "scorers" table — a user-defined scoring rule:
+# either an LLM-judge rubric (a prompt template with {{input}}/{{output}}/
+# {{expected}} placeholders plus a mapping from the judge's chosen label to
+# a 0-1 score), or a deterministic pattern-match/JSON-validity check (see
+# scorer_type on ScorerBase below).
 class Scorer(Base):
     __tablename__ = "scorers"
     # Slug only has to be unique within a project — two different customers
@@ -1008,7 +1011,8 @@ class PromptVersionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ScorerCreate/Update — a user-defined scoring rule. Three types:
+# ScorerBase/ScorerCreate/ScorerResponse — a user-defined scoring rule.
+# Three types:
 #   - "llm_judge" (default, existing behavior): `prompt_template` may
 #     reference {{input}}, {{output}}, {{expected}} — substituted at run
 #     time. `choice_scores` maps the judge's chosen label to a 0-1 score,
@@ -1017,25 +1021,44 @@ class PromptVersionResponse(BaseModel):
 #     which is far more reliable to parse out of an LLM response than
 #     asking it for a bare number).
 #   - "pattern_match": deterministic, no LLM call — scores 1.0 if `pattern`
-#     is found in the answer (regex `re.search` when `pattern_is_regex`,
+#     is found in the answer (regex `regex.search` when `pattern_is_regex`,
 #     otherwise a plain substring check), else 0.0.
 #   - "json_valid": deterministic, no LLM call — scores 1.0 if the answer
 #     parses as JSON via `json.loads`, else 0.0. No JSON Schema validation.
-class ScorerCreate(BaseModel):
+#
+# Split into three classes so the strict type-specific validation below
+# only ever applies to a REQUEST body, never to data read back out of the
+# database:
+#   - ScorerBase: the plain fields, no validation. Shared by both subclasses.
+#   - ScorerCreate(ScorerBase): adds the model_validator — used by the
+#     create/update request bodies, where "reject a malformed scorer before
+#     it's saved" is exactly the behavior we want.
+#   - ScorerResponse(ScorerBase): NOT a ScorerCreate subclass, so it does
+#     NOT inherit the validator. A pre-existing DB row can hold data that
+#     wouldn't pass today's stricter validation (e.g. an old row saved
+#     before this validator existed, with prompt_template=""); a response
+#     model's job is to faithfully report whatever the DB actually holds,
+#     not to re-validate it — GET /scorers must never 500 on a legacy row.
+class ScorerBase(BaseModel):
     name: str
     description: Optional[str] = None
     scorer_type: Literal["llm_judge", "pattern_match", "json_valid"] = "llm_judge"
-    # Required (non-None) only when scorer_type == "llm_judge" — see the
-    # model_validator below. Nullable here (not a plain `str`) because a
-    # pattern_match/json_valid scorer has no prompt at all.
+    # Required (non-None) only when scorer_type == "llm_judge" for a
+    # ScorerCreate request — see the model_validator there. Nullable here
+    # (not a plain `str`) because a pattern_match/json_valid scorer has no
+    # prompt at all, and because ScorerResponse (which doesn't validate)
+    # still needs to represent whatever value is actually in the DB.
     prompt_template: Optional[str] = None
     choice_scores: Optional[dict[str, float]] = None
-    # Required (non-empty) only when scorer_type == "pattern_match".
+    # Required (non-empty) only when scorer_type == "pattern_match", for a
+    # ScorerCreate request.
     pattern: Optional[str] = None
     pattern_is_regex: bool = False
     pass_threshold: float = 0.5
     run_online: bool = False
 
+
+class ScorerCreate(ScorerBase):
     @model_validator(mode="after")
     def _validate_type_specific_fields(self):
         if self.scorer_type == "llm_judge":
@@ -1050,7 +1073,7 @@ class ScorerCreate(BaseModel):
         return self
 
 
-class ScorerResponse(ScorerCreate):
+class ScorerResponse(ScorerBase):
     id: uuid.UUID
     slug: str
     created_at: datetime
@@ -3011,31 +3034,53 @@ _SCORER_PLACEHOLDERS = re.compile(r"\{\{(input|output|expected)\}\}")
 
 
 # Deterministic, no LLM call: does `answer` match scorer.pattern? Regex
-# (re.search) when pattern_is_regex, else a plain substring check. Score is
-# always 1.0 (match) or 0.0 (no match) — there's no partial-credit concept
-# for a deterministic check, unlike an LLM judge's label→score mapping. An
+# (via the third-party `regex` module, NOT stdlib `re` — see below) when
+# pattern_is_regex, else a plain substring check. Score is always 1.0
+# (match) or 0.0 (no match) — there's no partial-credit concept for a
+# deterministic check, unlike an LLM judge's label→score mapping. An
 # invalid regex (bad pattern_is_regex=True pattern) fails gracefully with
 # score=None, the same shape _run_custom_scorer's own except block returns,
-# rather than raising and 500ing the caller. `answer` is coerced to a plain
-# string first so a None answer (however unlikely from a real provider
-# response) can never raise a TypeError out of this function the way a bare
-# `scorer.pattern in None` would.
+# rather than raising and 500ing the caller. A falsy (None or empty)
+# `answer` is normalized to an empty string first so a None answer
+# (however unlikely from a real provider response) can never raise a
+# TypeError out of this function the way a bare `scorer.pattern in None`
+# would.
+#
+# Regex mode uses the `regex` PyPI package instead of stdlib `re`
+# specifically for its `timeout=` parameter: a user-supplied pathological
+# pattern (e.g. `(a|a)*(a|a)*(a|a)*$`) can take catastrophically long to
+# fail against even a short input under backtracking, and because CPython's
+# regex engines hold the GIL for the whole match, an unbounded match
+# doesn't just hang one request — it stalls the whole interpreter, and
+# since pattern_match scorers with run_online=true run inside
+# _run_online_scoring_once's single sequential per-project loop, one bad
+# pattern in any one project would permanently wedge online scoring for
+# every project in the deployment. stdlib `re` (and a ThreadPoolExecutor
+# wrapped around it) cannot bound this: a thread can't be cancelled
+# mid-match while it holds the GIL. The `regex` module's timeout is
+# cooperative and enforced inside its own C matching loop, so it can
+# actually bail out. A timeout raises the built-in `TimeoutError`
+# (confirmed empirically against the installed `regex` version), handled
+# the same way as an invalid pattern: score=None instead of a 500.
 def _run_pattern_match_scorer(scorer: "Scorer", answer: str) -> dict:
     answer = answer or ""
+    pattern = scorer.pattern or ""
     try:
         if scorer.pattern_is_regex:
-            matched = re.search(scorer.pattern, answer) is not None
+            matched = regex.search(pattern, answer, timeout=0.5) is not None
         else:
-            matched = scorer.pattern in answer
-    except re.error as e:
+            matched = pattern in answer
+    except regex.error as e:
         return {"label": None, "score": None, "explanation": f"(invalid regex: {e})"}
+    except TimeoutError:
+        return {"label": None, "score": None, "explanation": "(regex timed out — pattern too complex)"}
     score = 1.0 if matched else 0.0
     label = "match" if matched else "no_match"
     mode = "regex" if scorer.pattern_is_regex else "substring"
     return {
         "label": label,
         "score": score,
-        "explanation": f"{mode} pattern {scorer.pattern!r} {'matched' if matched else 'did not match'} the output",
+        "explanation": f"{mode} pattern {pattern!r} {'matched' if matched else 'did not match'} the output",
     }
 
 
@@ -3586,9 +3631,10 @@ def run_evaluation(req: EvalRequest, db: Session = Depends(get_db), project: Pro
     return EvalResponse(results=results)
 
 
-# 13. Scorers — user-defined LLM-judge rubrics, selectable in Evaluation
-# alongside the built-in faithfulness/relevance judge (see ScorerCreate/
-# ScorerResponse above and _run_custom_scorer above).
+# 13. Scorers — user-defined scoring rules (LLM-judge rubrics, or
+# deterministic pattern-match/JSON-validity checks), selectable in
+# Evaluation alongside the built-in faithfulness/relevance judge (see
+# ScorerBase/ScorerCreate/ScorerResponse above and _run_custom_scorer above).
 def _slugify(name: str) -> str:
     slug = "".join(c if c.isalnum() else "-" for c in name.lower()).strip("-")
     while "--" in slug:
