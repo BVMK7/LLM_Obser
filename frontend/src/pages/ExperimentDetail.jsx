@@ -430,7 +430,12 @@ export default function ExperimentDetail() {
       setCompareExperiment(null);
       return;
     }
-    getExperiment(compareId).then(setCompareExperiment).catch((err) => setError(err.message));
+    let cancelled = false;
+    setError(null);
+    getExperiment(compareId)
+      .then((exp) => { if (!cancelled) setCompareExperiment(exp); })
+      .catch((err) => { if (!cancelled) setError(err.message); });
+    return () => { cancelled = true; };
   }, [compareId]);
 
   useEffect(() => {
@@ -438,9 +443,12 @@ export default function ExperimentDetail() {
       setSignificance(null);
       return;
     }
+    let cancelled = false;
+    setError(null);
     getExperimentSignificance(id, compareId)
-      .then(setSignificance)
-      .catch((err) => setError(err.message));
+      .then((s) => { if (!cancelled) setSignificance(s); })
+      .catch((err) => { if (!cancelled) setError(err.message); });
+    return () => { cancelled = true; };
   }, [id, compareId]);
 
   const aggregates = useMemo(() => (experiment ? aggregateByProvider(experiment.results) : []), [experiment]);

@@ -210,6 +210,74 @@ def test_significance_requires_compare_id_query_param(api_headers):
     assert resp.status_code == 422
 
 
+def test_mcnemar_chi_square_branch_with_26_discordant_pairs(api_headers):
+    # 26 discordant pairs (all A-passed/B-failed, b=26, c=0) crosses the
+    # b+c >= 25 threshold into the chi-square-with-continuity-correction
+    # branch -- the one hand-written-formula path in this feature with no
+    # prior test coverage. Expected: chi2_stat = (26-1)**2/26 ~= 24.038,
+    # p_value = scipy.stats.chi2.sf(24.038, df=1) ~= 9.44e-7.
+    results_a = [{"question": f"q{i}", "provider": "groq", "answer": "x", "passed": True} for i in range(26)]
+    results_b = [{"question": f"q{i}", "provider": "groq", "answer": "y", "passed": False} for i in range(26)]
+    exp_a = _make_experiment(api_headers, "pytest-sig-chisq-a", results_a)
+    exp_b = _make_experiment(api_headers, "pytest-sig-chisq-b", results_b)
+
+    sig = _significance(api_headers, exp_a["id"], exp_b["id"])
+    mcnemar = _mcnemar_for(sig, "groq")
+    assert mcnemar["n"] == 26
+    assert mcnemar["b"] == 26
+    assert mcnemar["c"] == 0
+    assert mcnemar["p_value"] < 0.001
+    assert mcnemar["significant"] is True
+
+
+def test_significance_rejects_comparing_experiment_to_itself(api_headers):
+    exp = _make_experiment(api_headers, "pytest-sig-self-compare", [
+        {"question": "q", "provider": "groq", "answer": "x", "passed": True}
+    ])
+    resp = requests.get(
+        f"{BACKEND_URL}/experiments/{exp['id']}/significance",
+        headers=api_headers,
+        params={"compare_id": exp["id"]},
+    )
+    assert resp.status_code == 400
+
+
+def test_no_overlapping_scorer_keys_returns_empty_wilcoxon(api_headers):
+    results_a = [{"question": "q", "provider": "groq", "answer": "x", "scores": {"faithfulness": 0.9}}]
+    results_b = [{"question": "q", "provider": "groq", "answer": "y", "scores": {"relevance": 0.5}}]
+    exp_a = _make_experiment(api_headers, "pytest-sig-no-overlap-a", results_a)
+    exp_b = _make_experiment(api_headers, "pytest-sig-no-overlap-b", results_b)
+
+    sig = _significance(api_headers, exp_a["id"], exp_b["id"])
+    assert sig["wilcoxon"] == []
+
+
+def test_significance_404s_when_compare_belongs_to_different_project(api_headers, admin_headers):
+    # A second, unrelated project's experiment should 404 exactly like a
+    # nonexistent one -- confirms the ownership check, not just existence.
+    other_project = requests.post(
+        f"{BACKEND_URL}/projects", headers=admin_headers, json={"name": f"pytest-sig-other-{uuid.uuid4()}"}
+    )
+    other_project.raise_for_status()
+    other_project = other_project.json()
+    other_headers = {"X-API-Key": other_project["api_key"], "Content-Type": "application/json"}
+    try:
+        other_exp = _make_experiment(other_headers, "pytest-sig-other-project-exp", [
+            {"question": "q", "provider": "groq", "answer": "x", "passed": True}
+        ])
+        my_exp = _make_experiment(api_headers, "pytest-sig-mine", [
+            {"question": "q", "provider": "groq", "answer": "x", "passed": True}
+        ])
+        resp = requests.get(
+            f"{BACKEND_URL}/experiments/{my_exp['id']}/significance",
+            headers=api_headers,
+            params={"compare_id": other_exp["id"]},
+        )
+        assert resp.status_code == 404
+    finally:
+        requests.delete(f"{BACKEND_URL}/projects/{other_project['id']}", headers=admin_headers)
+
+
 def test_wilcoxon_all_identical_scores_n14_is_not_significant(api_headers):
     """14 paired rows with byte-identical scores on both sides -- the exact
     n that returns pvalue=nan (not a ValueError) from the installed scipy.

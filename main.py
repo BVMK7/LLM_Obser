@@ -3805,9 +3805,15 @@ def _paired_rows(
 # for every pair, by construction of _paired_rows's join key). See Global
 # Constraints for the exact formula -- do not change this math without
 # re-deriving it from McNemar's test's definition.
-def _mcnemar_test(pairs: list[tuple["ExperimentResult", "ExperimentResult"]]) -> dict:
+# Returns None (meaning: omit this provider from the response entirely) only
+# when there are zero gradeable pairs -- same contract as _wilcoxon_test
+# below -- there is nothing meaningful to report, not even a caveatable
+# n=0 result.
+def _mcnemar_test(pairs: list[tuple["ExperimentResult", "ExperimentResult"]]) -> Optional[dict]:
     gradeable = [(a, comp) for a, comp in pairs if a.passed is not None and comp.passed is not None]
     n = len(gradeable)
+    if n == 0:
+        return None
     b = sum(1 for a, comp in gradeable if a.passed and not comp.passed)  # A passed, B failed
     c = sum(1 for a, comp in gradeable if not a.passed and comp.passed)  # A failed, B passed
     discordant = b + c
@@ -3934,6 +3940,9 @@ def get_experiment_significance(
     if db_compare is None or db_compare.project_id != project.id:
         raise HTTPException(status_code=404, detail="Comparison experiment not found")
 
+    if experiment_id == compare_id:
+        raise HTTPException(status_code=400, detail="Cannot compare an experiment to itself")
+
     pairs = _paired_rows(db_experiment.results, db_compare.results)
     pairs_by_provider = defaultdict(list)
     for a, comp in pairs:
@@ -3942,6 +3951,8 @@ def get_experiment_significance(
     mcnemar_results = []
     for provider, provider_pairs in sorted(pairs_by_provider.items()):
         result = _mcnemar_test(provider_pairs)
+        if result is None:
+            continue
         mcnemar_results.append(
             McNemarResult(
                 provider=provider,
