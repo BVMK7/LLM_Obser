@@ -542,6 +542,9 @@ class ExperimentResult(Base):
     # always both-or-neither -- never partially set.
     human_verdict = Column(Boolean)
     reviewed_at = Column(DateTime(timezone=True))
+    # Multi-turn evaluation results — null for single-turn results, populated
+    # for multi-turn conversations. Stores the full turn transcript.
+    turns = Column(JSONB)
 
 
 # SQLAlchemy model for the "alert_rules" table — a threshold rule evaluated
@@ -3848,7 +3851,7 @@ def run_evaluation_one(req: EvalSingleRequest, db: Session = Depends(get_db), pr
 
 class EvalConversationRequest(BaseModel):
     provider: ProviderName
-    turns: list[TurnCase]
+    turns: list[TurnCase] = Field(min_length=1)
 
 
 class ConversationResult(BaseModel):
