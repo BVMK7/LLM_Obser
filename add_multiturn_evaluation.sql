@@ -1,0 +1,1 @@
+ALTER TABLE experiment_results ADD COLUMN IF NOT EXISTS turns JSONB;

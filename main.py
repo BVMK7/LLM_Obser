@@ -936,6 +936,12 @@ class TraceUpdate(BaseModel):
     cost: Optional[float] = None
 
 
+# TurnCase — one turn in a multi-turn conversation.
+class TurnCase(BaseModel):
+    question: str
+    expected: Optional[str] = None
+
+
 # EvalCase — one test case (question + optional expected keyword). Defined
 # here (rather than down in the Evaluation section, where it conceptually
 # lives) so the Dataset schemas below can reuse it directly: a saved
@@ -949,6 +955,13 @@ class EvalCase(BaseModel):
     id: Optional[str] = None
     question: str
     expected: Optional[str] = None
+    # Multi-turn evaluation -- when set, this case IS this sequence of
+    # turns; question/expected above are unused (still required by this
+    # model for backward compatibility with every existing single-turn
+    # caller). Lives on EvalCase (not a separate model) so a saved
+    # Dataset's `cases` can hold a mix of single-turn and multi-turn
+    # cases with zero changes to Dataset/DatasetCreate/DatasetResponse.
+    turns: Optional[list[TurnCase]] = None
 
 
 # DatasetCreate/Update — what the client sends to save a dataset.
@@ -1112,6 +1125,14 @@ class AlertStatus(BaseModel):
     sample_size: int
 
 
+# TurnResult — result of one turn in a multi-turn conversation.
+class TurnResult(BaseModel):
+    question: str
+    expected: Optional[str] = None
+    answer: str
+    passed: Optional[bool] = None
+
+
 # ExperimentResultIn — one (case, provider) result the client already has in
 # memory from a just-finished Evaluation run; POST /experiments persists a
 # whole batch of these in one call ("Save as Experiment").
@@ -1129,6 +1150,13 @@ class ExperimentResultIn(BaseModel):
     cost: float = 0.0
     latency_ms: int = 0
     trace_id: Optional[uuid.UUID] = None
+    # Multi-turn evaluation -- null for every single-turn result (past and
+    # future). When set, question/answer above hold the conversation's
+    # first question / final answer as a stable summary label, and
+    # passed/scores above hold the OVERALL judge verdict for the whole
+    # conversation (see _judge_conversation), never a combination of
+    # these per-turn results.
+    turns: Optional[list[TurnResult]] = None
 
 
 class ExperimentResultResponse(ExperimentResultIn):
@@ -3073,6 +3101,50 @@ def _judge_answer(question: str, expected: Optional[str], answer: str) -> dict:
         return {"faithfulness": None, "relevance": None, "hallucination": None, "judge_notes": f"(judge failed: {e})"}
 
 
+# Grades an ENTIRE multi-turn conversation at once, unlike _judge_answer's
+# single-question-and-answer grading -- this is what catches a conversation
+# that fails to use context established in an earlier turn, which no
+# per-turn keyword check or per-turn judge call could ever see. Same fixed
+# Groq-judge convention, same "never break the eval run" fallback.
+def _judge_conversation(turn_results: list["TurnResult"]) -> dict:
+    call_groq = PROVIDERS["groq"]
+    transcript = "\n".join(
+        f"Turn {i + 1} — Question: {t.question} "
+        f"Expected (may be empty): {t.expected or '(none provided)'} "
+        f"Answer: {t.answer}"
+        for i, t in enumerate(turn_results)
+    )
+    prompt = (
+        "You are grading a multi-turn AI assistant conversation for overall quality. "
+        f"Full transcript, in order:\n{transcript}\n"
+        "Score the CONVERSATION AS A WHOLE and respond with ONLY a JSON object, "
+        "no other text, in this exact shape: "
+        '{"passed": <true/false>, "faithfulness": <0.0-1.0>, "relevance": <0.0-1.0>, '
+        '"hallucination": <true/false>, "notes": "<one short sentence>"} '
+        "passed = did the assistant successfully complete the overall task across "
+        "all turns, correctly using context established in earlier turns? "
+        "faithfulness = does the conversation avoid contradicting any expected facts "
+        "given (if any)? relevance = did each answer actually address its own "
+        "question? hallucination = true if any answer states specific facts/numbers/"
+        "claims not supported by the expected answers or common knowledge."
+    )
+    try:
+        raw, _input_tokens, _output_tokens = call_groq(prompt)
+        cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(cleaned)
+        return {
+            "passed": bool(parsed["passed"]),
+            "faithfulness": float(parsed["faithfulness"]),
+            "relevance": float(parsed["relevance"]),
+            "hallucination": bool(parsed["hallucination"]),
+            "judge_notes": parsed.get("notes"),
+        }
+    except Exception as e:
+        # passed=None (not False) so a judge outage is visibly distinct
+        # from a genuine failed conversation.
+        return {"passed": None, "faithfulness": None, "relevance": None, "hallucination": None, "judge_notes": f"(judge failed: {e})"}
+
+
 _SCORER_PLACEHOLDERS = re.compile(r"\{\{(input|output|expected)\}\}")
 
 
@@ -3645,6 +3717,113 @@ def _run_eval_case(case: EvalCase, provider: str, db: Session, project_id, score
     )
 
 
+# Runs one multi-turn conversation end-to-end: real accumulated message
+# history per turn (unlike _run_eval_case's single question/answer), a
+# per-turn keyword check, one overall _judge_conversation call, and one
+# Trace with one Span per turn plus a judge span -- only ever logged on
+# the all-turns-succeeded path (see the per-turn exception branch below,
+# which mirrors _run_eval_case's own "never log a partial trace" behavior).
+def _run_multiturn_eval_case(turns: list["TurnCase"], provider: str, db: Session, project_id) -> "ConversationResult":
+    call_provider = PROVIDERS[provider]
+    model_used = MODEL_CATALOG[provider]["default"]
+
+    messages = []
+    turn_results = []
+    total_input_tokens = 0
+    total_output_tokens = 0
+    conversation_started_at = None
+
+    for turn in turns:
+        messages.append({"role": "user", "content": turn.question})
+        turn_started_at = datetime.now(timezone.utc)
+        if conversation_started_at is None:
+            conversation_started_at = turn_started_at
+
+        try:
+            answer, input_tokens, output_tokens = call_provider(messages, model=model_used)
+        except Exception as e:
+            turn_results.append(TurnResult(question=turn.question, expected=turn.expected, answer=f"Error: {e}", passed=False))
+            return ConversationResult(
+                provider=provider,
+                turns=turn_results,
+                passed=False,
+                faithfulness=None,
+                relevance=None,
+                hallucination=None,
+                judge_notes=None,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                total_tokens=total_input_tokens + total_output_tokens,
+                cost=estimate_cost(model_used, total_input_tokens, total_output_tokens),
+                latency_ms=int((datetime.now(timezone.utc) - conversation_started_at).total_seconds() * 1000),
+                trace_id=None,
+                error=str(e),
+            )
+
+        messages.append({"role": "assistant", "content": answer})
+        total_input_tokens += input_tokens
+        total_output_tokens += output_tokens
+
+        passed = None
+        if turn.expected and turn.expected.strip():
+            passed = turn.expected.strip().lower() in answer.lower()
+        turn_results.append(TurnResult(question=turn.question, expected=turn.expected, answer=answer, passed=passed))
+
+    judge, judge_started, judge_ended = _timed_call(_judge_conversation, turn_results)
+
+    total_tokens = total_input_tokens + total_output_tokens
+    cost = estimate_cost(model_used, total_input_tokens, total_output_tokens)
+    latency_ms = int((judge_ended - conversation_started_at).total_seconds() * 1000)
+
+    db_trace = _log_trace(
+        db,
+        project_id=project_id,
+        name=f"eval-conversation: {provider}",
+        input=turns[0].question,
+        output=turn_results[-1].answer,
+        started_at=conversation_started_at,
+        ended_at=judge_ended,
+        total_tokens=total_tokens,
+        cost=cost,
+        model=model_used,
+    )
+    for i, tr in enumerate(turn_results):
+        _log_span(
+            db,
+            trace_id=db_trace.id,
+            step_name=f"turn_{i + 1}",
+            input=tr.question,
+            output=tr.answer,
+            started_at=conversation_started_at,
+            ended_at=judge_started,
+        )
+    _log_span(
+        db,
+        trace_id=db_trace.id,
+        step_name="judge:conversation",
+        input="\n".join(f"Turn {i + 1}: {tr.question}" for i, tr in enumerate(turn_results)),
+        output=json.dumps(judge),
+        started_at=judge_started,
+        ended_at=judge_ended,
+    )
+
+    return ConversationResult(
+        provider=provider,
+        turns=turn_results,
+        passed=judge["passed"],
+        faithfulness=judge["faithfulness"],
+        relevance=judge["relevance"],
+        hallucination=judge["hallucination"],
+        judge_notes=judge["judge_notes"],
+        input_tokens=total_input_tokens,
+        output_tokens=total_output_tokens,
+        total_tokens=total_tokens,
+        cost=cost,
+        latency_ms=latency_ms,
+        trace_id=db_trace.id,
+    )
+
+
 # Single-pair endpoint — lets the frontend run cases one at a time and show
 # live progress, instead of waiting on one big batch call.
 class EvalSingleRequest(BaseModel):
@@ -3665,6 +3844,33 @@ def run_evaluation_one(req: EvalSingleRequest, db: Session = Depends(get_db), pr
     case = EvalCase(question=req.question, expected=req.expected)
     scorers = _lookup_scorers(db, project.id, req.scorer_slugs)
     return _run_eval_case(case, req.provider, db, project.id, scorers=scorers)
+
+
+class EvalConversationRequest(BaseModel):
+    provider: ProviderName
+    turns: list[TurnCase]
+
+
+class ConversationResult(BaseModel):
+    provider: str
+    turns: list[TurnResult]
+    passed: Optional[bool]
+    faithfulness: Optional[float] = None
+    relevance: Optional[float] = None
+    hallucination: Optional[bool] = None
+    judge_notes: Optional[str] = None
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost: float
+    latency_ms: int
+    trace_id: Optional[uuid.UUID]
+    error: Optional[str] = None
+
+
+@app.post("/evaluation/run_conversation", response_model=ConversationResult)
+def run_evaluation_conversation(req: EvalConversationRequest, db: Session = Depends(get_db), project: Project = Depends(get_current_project)):
+    return _run_multiturn_eval_case(req.turns, req.provider, db, project.id)
 
 
 @app.post("/evaluation/run", response_model=EvalResponse)
