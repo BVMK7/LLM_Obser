@@ -88,6 +88,18 @@ export async function runEvaluationOne(payload) {
   return res.json();
 }
 
+// Runs one multi-turn conversation (real accumulated message history per
+// turn, one overall judge call) -- see POST /evaluation/run_conversation
+// in main.py. One provider per call, unlike single-turn's multi-provider
+// loop, since a conversation is one continuous exchange, not something to
+// compare providers on within one submit.
+export const runEvaluationConversation = (provider, turns) =>
+  request("/evaluation/run_conversation", {
+    method: "POST",
+    body: { provider, turns },
+    errorMessage: "Failed to run conversation",
+  });
+
 export async function getProviderStatus() {
   const res = await fetch(`${API_BASE}/providers/status`);
   if (!res.ok) throw new Error("Failed to load provider status");

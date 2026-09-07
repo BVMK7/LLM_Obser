@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { getProviderStatus, runEvaluationOne, getDatasets, getDataset, createDataset, getScorers, createExperiment, API_BASE } from "../api";
+import { getProviderStatus, runEvaluationOne, runEvaluationConversation, getDatasets, getDataset, createDataset, getScorers, createExperiment, API_BASE } from "../api";
 import MetricCard from "../components/MetricCard";
 import StatusPill from "../components/StatusPill";
 import { downloadFile, formatTokens, percentile, toCSV } from "../utils";
@@ -45,6 +45,8 @@ export default function Evaluation() {
   const navigate = useNavigate();
   const [selectedProviders, setSelectedProviders] = useState(["gemini"]);
   const [cases, setCases] = useState([emptyCase()]);
+  const [mode, setMode] = useState("single"); // "single" | "multi"
+  const [turns, setTurns] = useState([{ question: "", expected: "" }]);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(null);
   const [results, setResults] = useState(null);
@@ -116,13 +118,43 @@ export default function Evaluation() {
   const addCase = () => setCases((prev) => [...prev, emptyCase()]);
   const removeCase = (index) => setCases((prev) => prev.filter((_, i) => i !== index));
 
+  const updateTurn = (index, field, value) =>
+    setTurns((prev) => prev.map((t, i) => (i === index ? { ...t, [field]: value } : t)));
+  const addTurn = () => setTurns((prev) => [...prev, { question: "", expected: "" }]);
+  const removeTurn = (index) => setTurns((prev) => prev.filter((_, i) => i !== index));
+
   const validCases = cases.filter((c) => c.question.trim());
-  const canRun = validCases.length > 0 && selectedProviders.length > 0 && !loading;
+  const canRun =
+    mode === "multi"
+      ? turns.some((t) => t.question.trim()) && selectedProviders.length > 0 && !loading
+      : validCases.length > 0 && selectedProviders.length > 0 && !loading;
 
   // Runs cases one pair at a time (rather than one big batch call) so the
   // UI can show real progress and fill in results as they land, instead of
   // one long wait followed by everything appearing at once.
   const handleRun = async () => {
+    if (mode === "multi") {
+      setLoading(true);
+      setError(null);
+      const validTurns = turns.filter((t) => t.question.trim());
+      if (validTurns.length === 0) {
+        setLoading(false);
+        return;
+      }
+      try {
+        const conversation = await runEvaluationConversation(selectedProviders[0], validTurns.map((t) => ({
+          question: t.question,
+          expected: t.expected.trim() || null,
+        })));
+        setResults([conversation]);
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+        setProgress(null);
+      }
+      return;
+    }
     if (!canRun) return;
     setLoading(true);
     setError(null);
@@ -250,6 +282,21 @@ export default function Evaluation() {
           ))}
         </div>
 
+        <div className="flex gap-2 mb-4">
+          <button
+            onClick={() => setMode("single")}
+            className={`px-3 py-1.5 text-sm border ${mode === "single" ? "border-[var(--brand-primary)] text-[var(--brand-primary)]" : "border-[var(--border-subtle)] text-[var(--text-secondary)]"}`}
+          >
+            Single-turn
+          </button>
+          <button
+            onClick={() => setMode("multi")}
+            className={`px-3 py-1.5 text-sm border ${mode === "multi" ? "border-[var(--brand-primary)] text-[var(--brand-primary)]" : "border-[var(--border-subtle)] text-[var(--text-secondary)]"}`}
+          >
+            Multi-turn
+          </button>
+        </div>
+
         <div className="flex items-center justify-between mb-2">
           <label className="block text-xs uppercase tracking-wide text-[var(--text-muted)]">
             Scorers <span className="normal-case text-[var(--text-muted)]">(optional, in addition to the built-in judge)</span>
@@ -307,32 +354,62 @@ export default function Evaluation() {
             </button>
           </div>
         </div>
-        <div className="flex flex-col gap-2 mb-3">
-          {cases.map((c, i) => (
-            <div key={i} className="flex gap-2 items-start">
-              <input
-                value={c.question}
-                onChange={(e) => updateCase(i, "question", e.target.value)}
-                placeholder="Question"
-                className="flex-1 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
-              />
-              <input
-                value={c.expected}
-                onChange={(e) => updateCase(i, "expected", e.target.value)}
-                placeholder="Expected keyword (optional)"
-                className="w-56 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
-              />
-              <button
-                onClick={() => removeCase(i)}
-                disabled={cases.length === 1}
-                className="px-2 py-2 text-[var(--text-muted)] hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed"
-                title="Remove case"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-        </div>
+        {mode === "single" ? (
+          <div className="flex flex-col gap-2 mb-3">
+            {cases.map((c, i) => (
+              <div key={i} className="flex gap-2 items-start">
+                <input
+                  value={c.question}
+                  onChange={(e) => updateCase(i, "question", e.target.value)}
+                  placeholder="Question"
+                  className="flex-1 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+                />
+                <input
+                  value={c.expected}
+                  onChange={(e) => updateCase(i, "expected", e.target.value)}
+                  placeholder="Expected keyword (optional)"
+                  className="w-56 bg-[var(--bg-input)] border border-[var(--border-subtle)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+                />
+                <button
+                  onClick={() => removeCase(i)}
+                  disabled={cases.length === 1}
+                  className="px-2 py-2 text-[var(--text-muted)] hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed"
+                  title="Remove case"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2 mb-3">
+            {turns.map((t, i) => (
+              <div key={i} className="flex gap-2 mb-2 items-start">
+                <span className="text-xs text-[var(--text-muted)] mt-2 w-14 shrink-0">Turn {i + 1}</span>
+                <input
+                  value={t.question}
+                  onChange={(e) => updateTurn(i, "question", e.target.value)}
+                  placeholder="Question"
+                  className="flex-1 bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                />
+                <input
+                  value={t.expected}
+                  onChange={(e) => updateTurn(i, "expected", e.target.value)}
+                  placeholder="Expected keyword (optional)"
+                  className="flex-1 bg-[var(--bg-input)] border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-primary)]"
+                />
+                {turns.length > 1 && (
+                  <button onClick={() => removeTurn(i)} className="text-[var(--text-muted)] hover:text-[var(--brand-danger)] mt-2">
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))}
+            <button onClick={addTurn} className="text-sm text-[var(--brand-primary)] mb-4">
+              + Add turn
+            </button>
+          </div>
+        )}
 
         <div className="flex items-center gap-3">
           <button
@@ -436,28 +513,50 @@ export default function Evaluation() {
             </thead>
             <tbody>
               {results.map((r, i) => (
-                <tr key={i} className="border-b border-[var(--border-subtle)] last:border-0 align-top">
-                  <td className="py-2 pr-3 text-[var(--text-primary)] max-w-[180px]">{r.question}</td>
-                  <td className="py-2 pr-3 text-[var(--text-muted)]">{r.expected || "—"}</td>
-                  <td className="py-2 pr-3 text-[var(--brand-primary)] capitalize">{r.provider}</td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)] max-w-[280px] whitespace-pre-wrap">{r.answer}</td>
-                  <td className="py-2 pr-3">
-                    <StatusPill status={r.passed == null ? "ungraded" : r.passed ? "pass" : "fail"} />
-                  </td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]" title={r.judge_notes || ""}>
-                    {r.faithfulness != null ? `F:${pct(r.faithfulness)} R:${pct(r.relevance)}` : "—"}
-                    {r.hallucination && <span className="text-[var(--brand-danger)]"> ⚠</span>}
-                  </td>
-                  {selectedScorerSlugs.length > 0 && (
-                    <td className="py-2 pr-3 text-[var(--text-secondary)]">
-                      {Object.entries(r.scorer_scores || {})
-                        .map(([name, v]) => `${name}:${pct(v)}`)
-                        .join(" · ") || "—"}
-                    </td>
+                <Fragment key={i}>
+                  {r.turns ? (
+                    <tr className="border-b border-[var(--border-subtle)] last:border-0 align-top">
+                      <td colSpan={selectedScorerSlugs.length > 0 ? 9 : 8} className="py-2">
+                        <div className="border border-[var(--border-subtle)] p-3 mb-2">
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="text-sm font-medium text-[var(--text-primary)]">{r.turns.length} turns · {r.provider}</span>
+                            <StatusPill status={r.passed ? "success" : "error"} label={r.passed ? "passed" : "failed"} />
+                          </div>
+                          {r.turns.map((t, ti) => (
+                            <div key={ti} className="text-xs text-[var(--text-secondary)] mb-1 pl-2 border-l border-[var(--border-subtle)]">
+                              <div><span className="text-[var(--text-muted)]">Turn {ti + 1}:</span> {t.question}</div>
+                              <div>{t.answer} {t.passed != null && (t.passed ? "✓" : "✕")}</div>
+                            </div>
+                          ))}
+                          {r.judge_notes && <div className="text-xs text-[var(--text-muted)] mt-2 italic">{r.judge_notes}</div>}
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr className="border-b border-[var(--border-subtle)] last:border-0 align-top">
+                      <td className="py-2 pr-3 text-[var(--text-primary)] max-w-[180px]">{r.question}</td>
+                      <td className="py-2 pr-3 text-[var(--text-muted)]">{r.expected || "—"}</td>
+                      <td className="py-2 pr-3 text-[var(--brand-primary)] capitalize">{r.provider}</td>
+                      <td className="py-2 pr-3 text-[var(--text-secondary)] max-w-[280px] whitespace-pre-wrap">{r.answer}</td>
+                      <td className="py-2 pr-3">
+                        <StatusPill status={r.passed == null ? "ungraded" : r.passed ? "pass" : "fail"} />
+                      </td>
+                      <td className="py-2 pr-3 text-[var(--text-secondary)]" title={r.judge_notes || ""}>
+                        {r.faithfulness != null ? `F:${pct(r.faithfulness)} R:${pct(r.relevance)}` : "—"}
+                        {r.hallucination && <span className="text-[var(--brand-danger)]"> ⚠</span>}
+                      </td>
+                      {selectedScorerSlugs.length > 0 && (
+                        <td className="py-2 pr-3 text-[var(--text-secondary)]">
+                          {Object.entries(r.scorer_scores || {})
+                            .map(([name, v]) => `${name}:${pct(v)}`)
+                            .join(" · ") || "—"}
+                        </td>
+                      )}
+                      <td className="py-2 pr-3 text-[var(--text-secondary)]">{r.latency_ms}ms</td>
+                      <td className="py-2 text-[var(--text-secondary)]">{formatTokens(r.total_tokens)}</td>
+                    </tr>
                   )}
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">{r.latency_ms}ms</td>
-                  <td className="py-2 text-[var(--text-secondary)]">{formatTokens(r.total_tokens)}</td>
-                </tr>
+                </Fragment>
               ))}
             </tbody>
           </table>
