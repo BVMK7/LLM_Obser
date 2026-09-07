@@ -199,8 +199,8 @@ export default function Evaluation() {
       const experiment = await createExperiment({
         name: name.trim(),
         dataset_id: selectedDatasetId || null,
-        providers: selectedProviders,
-        scorer_slugs: selectedScorerSlugs,
+        providers: mode === "multi" ? [selectedProviders[0]] : selectedProviders,
+        scorer_slugs: mode === "multi" ? [] : selectedScorerSlugs,
         // A multi-turn ConversationResult (r.turns present) has no top-level
         // question/answer of its own -- the backend's ExperimentResultIn
         // treats question/answer as the conversation's first-question/
@@ -549,7 +549,7 @@ export default function Evaluation() {
                         <div className="border border-[var(--border-subtle)] p-3 mb-2">
                           <div className="flex justify-between items-center mb-2">
                             <span className="text-sm font-medium text-[var(--text-primary)]">{r.turns.length} turns · {r.provider}</span>
-                            <StatusPill status={r.passed ? "success" : "error"} label={r.passed ? "passed" : "failed"} />
+                            <StatusPill status={r.passed == null ? "ungraded" : r.passed ? "pass" : "fail"} />
                           </div>
                           {r.turns.map((t, ti) => (
                             <div key={ti} className="text-xs text-[var(--text-secondary)] mb-1 pl-2 border-l border-[var(--border-subtle)]">

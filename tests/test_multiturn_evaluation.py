@@ -30,6 +30,12 @@ def _post_raw(path, headers, body=None):
     return requests.post(f"{BACKEND_URL}{path}", headers=headers, json=body or {})
 
 
+def _get(path, headers):
+    resp = requests.get(f"{BACKEND_URL}{path}", headers=headers)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def _run_conversation(api_headers, provider, turns):
     return _post("/evaluation/run_conversation", api_headers, {"provider": provider, "turns": turns})
 
@@ -47,6 +53,13 @@ def test_context_carries_across_turns(api_headers):
     assert result["turns"][0]["passed"] is None  # no expected given on turn 1
     assert result["turns"][1]["passed"] is True
     assert result["trace_id"] is not None
+
+    trace = _get(f"/traces/{result['trace_id']}", api_headers)
+    assert trace["name"] == "eval-conversation: groq"
+    names = [s["step_name"] for s in trace["spans"]]
+    assert names.count("judge:conversation") == 1
+    assert len([n for n in names if n.startswith("judge:")]) == 1  # never one judge per turn
+    assert {"turn_1", "turn_2"} <= set(names)
 
 
 def test_multiturn_conversation_passes_end_to_end(api_headers):
