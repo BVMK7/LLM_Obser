@@ -201,24 +201,53 @@ export default function Evaluation() {
         dataset_id: selectedDatasetId || null,
         providers: selectedProviders,
         scorer_slugs: selectedScorerSlugs,
-        results: results.map((r) => ({
-          question: r.question,
-          expected: r.expected,
-          provider: r.provider,
-          answer: r.answer,
-          passed: r.passed,
-          scores: {
-            ...(r.faithfulness != null ? { faithfulness: r.faithfulness } : {}),
-            ...(r.relevance != null ? { relevance: r.relevance } : {}),
-            ...r.scorer_scores,
-          },
-          input_tokens: r.input_tokens,
-          output_tokens: r.output_tokens,
-          total_tokens: r.total_tokens,
-          cost: r.cost,
-          latency_ms: r.latency_ms,
-          trace_id: r.trace_id,
-        })),
+        // A multi-turn ConversationResult (r.turns present) has no top-level
+        // question/answer of its own -- the backend's ExperimentResultIn
+        // treats question/answer as the conversation's first-question/
+        // final-answer summary label in that case, with passed/scores as
+        // the OVERALL judge verdict and the full per-turn detail carried in
+        // `turns`. Without this branch the single-turn mapping below would
+        // read r.question/r.answer as undefined for a conversation result,
+        // and JSON.stringify would silently drop those keys before the POST.
+        results: results.map((r) =>
+          r.turns
+            ? {
+                question: r.turns[0].question,
+                expected: null,
+                provider: r.provider,
+                answer: r.turns[r.turns.length - 1].answer,
+                passed: r.passed,
+                turns: r.turns,
+                scores: {
+                  ...(r.faithfulness != null ? { faithfulness: r.faithfulness } : {}),
+                  ...(r.relevance != null ? { relevance: r.relevance } : {}),
+                },
+                input_tokens: r.input_tokens,
+                output_tokens: r.output_tokens,
+                total_tokens: r.total_tokens,
+                cost: r.cost,
+                latency_ms: r.latency_ms,
+                trace_id: r.trace_id,
+              }
+            : {
+                question: r.question,
+                expected: r.expected,
+                provider: r.provider,
+                answer: r.answer,
+                passed: r.passed,
+                scores: {
+                  ...(r.faithfulness != null ? { faithfulness: r.faithfulness } : {}),
+                  ...(r.relevance != null ? { relevance: r.relevance } : {}),
+                  ...r.scorer_scores,
+                },
+                input_tokens: r.input_tokens,
+                output_tokens: r.output_tokens,
+                total_tokens: r.total_tokens,
+                cost: r.cost,
+                latency_ms: r.latency_ms,
+                trace_id: r.trace_id,
+              }
+        ),
       });
       navigate(`/experiments/${experiment.id}`);
     } catch (err) {

@@ -114,7 +114,11 @@ export function bucketByTime(traces, rangeKey) {
 export function toCSV(rows) {
   if (!rows.length) return "";
   const headers = Object.keys(rows[0]);
-  const escape = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  // Arrays/objects (e.g. a multi-turn result's `turns` list) would otherwise
+  // hit default JS stringification and come out as "[object Object]" --
+  // stringify them to readable JSON instead, so no data is lost.
+  const cellText = (v) => (v != null && typeof v === "object" ? JSON.stringify(v) : String(v ?? ""));
+  const escape = (v) => `"${cellText(v).replace(/"/g, '""')}"`;
   const lines = [headers.join(","), ...rows.map((r) => headers.map((h) => escape(r[h])).join(","))];
   return lines.join("\n");
 }
