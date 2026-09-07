@@ -155,7 +155,7 @@ EXPERIMENT_KEYS = {
 EXPERIMENT_RESULT_KEYS = {
     "id", "experiment_id", "question", "expected", "provider", "model", "answer",
     "passed", "scores", "input_tokens", "output_tokens", "total_tokens", "cost",
-    "latency_ms", "trace_id", "created_at", "human_verdict", "reviewed_at",
+    "latency_ms", "trace_id", "created_at", "human_verdict", "reviewed_at", "turns",
 }
 
 
