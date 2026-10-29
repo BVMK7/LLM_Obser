@@ -176,7 +176,7 @@ export default function PromptLibrary() {
               key={p.id}
               onClick={() => selectPrompt(p.id)}
               className={`w-full text-left px-3 py-2 rounded-lg mb-1 transition-colors ${
-                p.id === selectedId ? "bg-[var(--brand-primary)]" : "hover:bg-white/5"
+                p.id === selectedId ? "bg-[var(--brand-primary)]" : "hover:bg-[var(--hover-overlay)]"
               }`}
             >
               <div className={`text-sm truncate ${p.id === selectedId ? "text-white" : "text-[var(--text-primary)]"}`}>
@@ -236,7 +236,7 @@ export default function PromptLibrary() {
                   {detail.id && (
                     <button
                       onClick={handleDelete}
-                      className="text-xs px-2.5 py-1.5 rounded-lg bg-white/5 text-[var(--brand-danger)] hover:bg-white/10 transition-colors"
+                      className="text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-muted)] text-[var(--brand-danger)] hover:bg-[var(--hover-overlay)] transition-colors"
                     >
                       Delete
                     </button>

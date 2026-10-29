@@ -32,7 +32,7 @@ export default function ProviderHeatmap({ traces, metric = "count", title = "Pro
                   <span className="text-[var(--text-secondary)] capitalize">{provider}</span>
                   <span style={{ color }}>{pct}%</span>
                 </div>
-                <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                <div className="h-1.5 rounded-full bg-[var(--surface-muted)] overflow-hidden">
                   <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />
                 </div>
               </div>

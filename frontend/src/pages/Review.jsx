@@ -47,7 +47,7 @@ function SeverityPill({ severity }) {
 
 function SourceBadge({ source }) {
   return (
-    <span className="inline-block text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded font-medium bg-white/5 text-[var(--text-secondary)]">
+    <span className="inline-block text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded font-medium bg-[var(--surface-muted)] text-[var(--text-secondary)]">
       {SOURCE_LABELS[source] || source}
     </span>
   );
@@ -140,7 +140,7 @@ export default function Review() {
                     <StatusPill status={t.status} />
                     <button
                       onClick={() => handleResolveAll(t.id)}
-                      className="text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)] hover:bg-white/10 transition-colors"
+                      className="text-xs px-2.5 py-1 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:bg-[var(--hover-overlay)] transition-colors"
                       title="Resolve every open flag on this trace at once"
                     >
                       Resolve all
@@ -165,7 +165,7 @@ export default function Review() {
                       <button
                         onClick={() => handleResolveFlag(t.id, f.id)}
                         disabled={resolvingFlagId === f.id}
-                        className="shrink-0 text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)] hover:bg-white/10 disabled:opacity-40 transition-colors"
+                        className="shrink-0 text-xs px-2.5 py-1 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:bg-[var(--hover-overlay)] disabled:opacity-40 transition-colors"
                       >
                         {resolvingFlagId === f.id ? "Resolving…" : "Resolve"}
                       </button>

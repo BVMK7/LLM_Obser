@@ -246,7 +246,7 @@ export default function Playground() {
         <button
           onClick={handleSavePromptToLibrary}
           disabled={!systemPrompt.trim()}
-          className="w-full px-3 py-1.5 rounded-lg bg-white/5 text-[var(--text-secondary)] text-xs hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors mb-4"
+          className="w-full px-3 py-1.5 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] text-xs hover:bg-[var(--hover-overlay)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors mb-4"
         >
           Save to Prompt Library
         </button>

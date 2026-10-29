@@ -58,7 +58,7 @@ function OverviewTab({ trace }) {
               <span
                 key={s.id}
                 title={s.explanation || ""}
-                className="text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)]"
+                className="text-xs px-2.5 py-1 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)]"
               >
                 {s.score_name === "user_feedback" ? (s.score_value >= 1 ? "👍" : "👎") : `${s.score_name}: ${s.score_value}`}
               </span>
@@ -164,7 +164,7 @@ export default function TraceDetails() {
             className={`text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
               trace.flagged_for_review
                 ? "bg-[color-mix(in_srgb,var(--brand-warning)_15%,transparent)] text-[var(--brand-warning)]"
-                : "bg-white/5 text-[var(--text-secondary)] hover:bg-white/10"
+                : "bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:bg-[var(--hover-overlay)]"
             }`}
           >
             {trace.flagged_for_review ? "🚩 Flagged for review" : "Flag for review"}

@@ -1,44 +1,50 @@
 @import "tailwindcss";
 
-/* Design tokens — dark-navy chrome/cards, white page canvas.
-   Every component reads colors through these variables (not literal hex).
-   Sidebar, topbar, cards, and inputs keep their fixed dark-navy colors in
-   BOTH platform themes (see .app-shell[data-theme] below) — only --bg-app
-   (the page canvas), --text-on-canvas(-muted), and the circuit-grid colors
-   change with the theme, since only they sit directly on the canvas. */
+/* Design tokens — recreated to match the InferenceIQ reference design
+   (light canvas, white cards, rounded corners, blue accent, soft shadows).
+   Every component reads colors through these variables (not literal hex),
+   and now the sidebar/topbar/cards genuinely follow the theme toggle instead
+   of staying fixed-dark in both themes. */
 :root {
-  --bg-app: #ffffff;
-  --bg-sidebar: #1b1d24;
-  --bg-card: #1b1d24;
-  --bg-input: #262832;
-  --border-subtle: rgba(255, 255, 255, 0.08);
+  --bg-app: #f3f4f6;
+  --bg-sidebar: #ffffff;
+  --bg-card: #ffffff;
+  --bg-input: #ffffff;
+  --border-subtle: rgba(15, 23, 42, 0.08);
+  --hover-overlay: rgba(15, 23, 42, 0.06);
+  --surface-muted: rgba(15, 23, 42, 0.04);
 
-  --text-primary: #f4f5f7;
-  --text-secondary: #9a9fab;
-  --text-muted: #6f7480;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
 
-  --brand-primary: #4d7fe0;
-  --brand-primary-hover: #3d68c4;
-  --brand-success: #5cc180;
-  --brand-warning: #e0a44d;
-  --brand-danger: #f0847b;
+  --brand-primary: #2563eb;
+  --brand-primary-hover: #1d4ed8;
+  --brand-success: #16a34a;
+  --brand-warning: #d97706;
+  --brand-danger: #dc2626;
 
-  /* Canvas-only tokens — text sitting directly on --bg-app (not inside a
-     card) and the circuit-grid overlay. Light theme (default) values. */
-  --text-on-canvas: #16161d;
-  --text-on-canvas-muted: #52525b;
-  --grid-line: rgba(75, 85, 99, 0.08);
-  --grid-dot: rgba(55, 65, 81, 0.12);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
 }
 
-/* Dark platform theme — flips the canvas dark to match the sidebar/cards.
-   Toggled via ThemeContext.jsx, applied to the .app-shell wrapper. */
-.app-shell[data-theme="dark"] {
-  --bg-app: #0f1115;
-  --text-on-canvas: #f4f5f7;
-  --text-on-canvas-muted: #9a9fab;
-  --grid-line: rgba(255, 255, 255, 0.06);
-  --grid-dot: rgba(255, 255, 255, 0.1);
+/* Dark platform theme — now genuinely recolors the chrome (sidebar/topbar/
+   cards), not just the page canvas. Toggled via ThemeContext.jsx (applied to
+   .app-shell) and AuthShell.jsx (applied to .auth-page) — a bare attribute
+   selector so both wrappers pick it up, not just the main app shell. */
+[data-theme="dark"] {
+  --bg-app: #0b0d12;
+  --bg-sidebar: #12141a;
+  --bg-card: #161820;
+  --bg-input: #1b1e26;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --hover-overlay: rgba(255, 255, 255, 0.08);
+  --surface-muted: rgba(255, 255, 255, 0.05);
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 body {
@@ -49,104 +55,28 @@ body {
 }
 
 .app-shell {
-  position: relative;
   background-color: var(--bg-app);
 }
 
-/* Faint circuit-board grid — same repeating-gradient technique as the
-   Uiverse "circuit-wrapper" snippet, its original colors, since this
-   surface is white like the snippet's own background. */
-.app-shell::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background-image: repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 19px,
-      var(--grid-line) 19px,
-      var(--grid-line) 20px,
-      transparent 20px,
-      transparent 39px,
-      var(--grid-line) 39px,
-      var(--grid-line) 40px
-    ),
-    repeating-linear-gradient(
-      90deg,
-      transparent,
-      transparent 19px,
-      var(--grid-line) 19px,
-      var(--grid-line) 20px,
-      transparent 20px,
-      transparent 39px,
-      var(--grid-line) 39px,
-      var(--grid-line) 40px
-    ),
-    radial-gradient(circle at 20px 20px, var(--grid-dot) 2px, transparent 2px),
-    radial-gradient(circle at 40px 40px, var(--grid-dot) 2px, transparent 2px);
-  background-size: 40px 40px, 40px 40px, 40px 40px, 40px 40px;
-}
-
-.app-shell > * {
-  position: relative;
-  z-index: 1;
-}
-
-/* Every page's title/intro sits directly on the white canvas above (not
-   inside a dark card), so it needs a dark color instead of the light
-   --text-primary/--text-muted tokens the cards around it still use.
-   `main h1` is safe globally — page titles are the only h1 in the app,
-   never used inside a card. The intro paragraph is always a direct
-   child of the page's root div (siblings with the card divs, one level
-   shallower than any text nested inside a card), so `main > div > p`
-   reliably catches it without touching in-card paragraphs. */
-main h1 {
-  color: var(--text-on-canvas);
-}
-main > div > p {
-  color: var(--text-on-canvas-muted);
-}
-
-/* Cards render as a true solid --bg-card (no transparency/blend-through)
-   so they match --bg-sidebar exactly now that the page canvas behind them
-   is white — any transparency here would let white bleed in and lighten
-   them relative to the sidebar. */
+/* Cards render as a true solid --bg-card (no transparency/blend-through),
+   with a soft shadow instead of relying on the border alone for separation
+   from the canvas — matches the reference's borderless, shadow-based cards. */
 [class*="bg-[var(--bg-card)]"] {
   background-color: var(--bg-card) !important;
+  box-shadow: var(--shadow-card);
 }
 
-/* Sharp-edged aesthetic: flatten every Tailwind rounded-* utility (cards,
-   buttons, pills, inputs, avatar) from one place instead of stripping the
-   class from every call site. */
-*,
-*::before,
-*::after {
-  border-radius: 0 !important;
-}
-
-/* Login/Signup background — a radiating sunburst (repeating-conic-gradient)
-   over a faint square grid (two repeating-linear-gradients), independent of
-   the app-wide --bg-app/--bg-card tokens above since it's specific to the
-   auth pages. --auth-* is redefined per data-theme so both themes render
-   the exact same pattern, just recolored. */
+/* Login/Signup background — simple, clean canvas matching the main app's
+   light aesthetic (no sunburst/circuit texture). --auth-* is redefined per
+   data-theme so both themes render consistently, just recolored. */
 .auth-page {
   position: relative;
-  --auth-bg: #17181d;
-  --auth-ray: rgba(255, 255, 255, 0.045);
-  --auth-grid: rgba(255, 255, 255, 0.07);
+  --auth-bg: #f3f4f6;
   background-color: var(--auth-bg);
-  background-image:
-    repeating-conic-gradient(from 0deg at 50% 45%, var(--auth-ray) 0deg 7.5deg, transparent 7.5deg 15deg),
-    repeating-linear-gradient(to right, var(--auth-grid) 0 1px, transparent 1px 64px),
-    repeating-linear-gradient(to bottom, var(--auth-grid) 0 1px, transparent 1px 64px);
 }
 
-.auth-page[data-theme="light"] {
-  --auth-bg: #eef0f4;
-  --auth-ray: rgba(0, 0, 0, 0.04);
-  --auth-grid: rgba(0, 0, 0, 0.08);
+.auth-page[data-theme="dark"] {
+  --auth-bg: #0b0d12;
 }
 
 .auth-theme-toggle {
@@ -158,13 +88,14 @@ main > div > p {
   justify-content: center;
   width: 36px;
   height: 36px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  color: #d5d7dc;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  color: #43454d;
   cursor: pointer;
 }
-.auth-page[data-theme="light"] .auth-theme-toggle {
-  background: rgba(0, 0, 0, 0.04);
-  border-color: rgba(0, 0, 0, 0.12);
-  color: #43454d;
+.auth-page[data-theme="dark"] .auth-theme-toggle {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #d5d7dc;
 }

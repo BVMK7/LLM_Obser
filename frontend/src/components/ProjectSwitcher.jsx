@@ -186,12 +186,12 @@ export default function ProjectSwitcher() {
 
   return (
     <>
-      <div className="hidden lg:flex items-center gap-1">
+      <div className="flex flex-col gap-2">
         <select
           value={activeId || ""}
           onChange={handleSelect}
           title="Switch which project's data you're viewing"
-          className="bg-[var(--bg-input)] border border-[var(--border-subtle)] px-2 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--brand-primary)]"
+          className="w-full bg-transparent text-sm font-medium text-[var(--text-primary)] focus:outline-none cursor-pointer"
         >
           {projects.map((p) => (
             <option key={p.id} value={p.id}>
@@ -201,21 +201,23 @@ export default function ProjectSwitcher() {
           <option value="__new__">+ New project…</option>
         </select>
         {activeId && (
-          <Link
-            to={`/projects/${activeId}/settings`}
-            title="Project settings — members, API keys, billing"
-            className="w-7 h-7 flex items-center justify-center border border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-xs"
-          >
-            ⚙
-          </Link>
+          <div className="flex items-center justify-between pt-2 border-t border-[var(--border-subtle)]">
+            <Link
+              to={`/projects/${activeId}/settings`}
+              title="Project settings — members, API keys, kill-switch limits, billing"
+              className="text-xs text-[var(--text-secondary)] hover:text-[var(--brand-primary)] transition-colors"
+            >
+              ⚙ Project settings
+            </Link>
+            <button
+              onClick={handleDelete}
+              title="Delete this project"
+              className="text-xs text-[var(--text-muted)] hover:text-[var(--brand-danger)] transition-colors"
+            >
+              🗑
+            </button>
+          </div>
         )}
-        <button
-          onClick={handleDelete}
-          title="Delete this project"
-          className="w-7 h-7 flex items-center justify-center border border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-[var(--brand-danger)] hover:border-[var(--brand-danger)]/50 transition-colors text-xs"
-        >
-          🗑
-        </button>
       </div>
 
       {modal?.stage === "name" && createPortal(

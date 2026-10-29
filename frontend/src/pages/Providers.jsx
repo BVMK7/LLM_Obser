@@ -200,7 +200,7 @@ export default function Providers() {
                 <td className="py-2.5 text-[var(--text-primary)]">
                   {row.model}
                   {row.isDefault && (
-                    <span className="ml-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-white/5 text-[var(--text-muted)]">
+                    <span className="ml-2 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--surface-muted)] text-[var(--text-muted)]">
                       default
                     </span>
                   )}

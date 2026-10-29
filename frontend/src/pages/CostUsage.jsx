@@ -121,7 +121,7 @@ export default function CostUsage() {
                     className={`text-xs px-2.5 py-1 rounded-md capitalize transition-colors ${
                       metric === key
                         ? "bg-[var(--brand-primary)] text-white"
-                        : "bg-white/5 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                        : "bg-[var(--surface-muted)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                     }`}
                   >
                     {METRICS[key].label}
@@ -136,7 +136,7 @@ export default function CostUsage() {
                     className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
                       range === key
                         ? "bg-[var(--brand-primary)] text-white"
-                        : "bg-white/5 text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                        : "bg-[var(--surface-muted)] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
                     }`}
                   >
                     {key}

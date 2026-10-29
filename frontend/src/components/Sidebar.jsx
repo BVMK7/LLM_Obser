@@ -1,5 +1,7 @@
 import { NavLink } from "react-router-dom";
+import ProjectSwitcher from "./ProjectSwitcher";
 import {
+  LampIcon,
   OverviewIcon,
   TracesIcon,
   PerformanceIcon,
@@ -59,29 +61,38 @@ const navSections = [
   },
 ];
 
+const linkClass = ({ isActive }) =>
+  `flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+    isActive
+      ? "bg-[color-mix(in_srgb,var(--brand-primary)_10%,transparent)] text-[var(--brand-primary)] font-medium"
+      : "text-[var(--text-secondary)] hover:bg-[var(--hover-overlay)] hover:text-[var(--text-primary)]"
+  }`;
+
 export default function Sidebar() {
   return (
-    <aside className="w-60 shrink-0 bg-[var(--bg-sidebar)] border-r border-[var(--border-subtle)] flex flex-col p-4 overflow-y-auto">
-      <nav className="flex flex-col mt-1">
+    <aside className="w-64 shrink-0 bg-[var(--bg-sidebar)] border-r border-[var(--border-subtle)] flex flex-col overflow-y-auto">
+      {/* Brand header */}
+      <div className="flex items-center gap-2 px-4 py-4">
+        <div className="w-8 h-8 rounded-lg bg-[var(--brand-primary)] flex items-center justify-center text-white shrink-0">
+          <LampIcon className="w-5 h-5" />
+        </div>
+        <span className="font-semibold text-base text-[var(--text-primary)]">InferenceIQ</span>
+      </div>
+
+      {/* Workspace switcher card */}
+      <div className="mx-4 mb-3 px-3 py-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-input)]">
+        <ProjectSwitcher />
+      </div>
+
+      <nav className="flex flex-col px-4">
         {navSections.map((section) => (
           <div key={section.label} className="mb-3">
-            <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-2 px-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--text-muted)] mb-2 px-3">
               {section.label}
             </div>
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-0.5">
               {section.items.map((item) => (
-                <NavLink
-                  key={item.label}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) =>
-                    `flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
-                      isActive
-                        ? "bg-[color-mix(in_srgb,var(--brand-primary)_10%,transparent)] text-[var(--brand-primary)]"
-                        : "text-[var(--text-secondary)] hover:bg-white/5 hover:text-[var(--text-primary)]"
-                    }`
-                  }
-                >
+                <NavLink key={item.label} to={item.to} end={item.end} className={linkClass}>
                   <span className="w-[18px] shrink-0 flex items-center justify-center">{item.icon}</span>
                   {item.label}
                 </NavLink>
@@ -91,22 +102,13 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      <div className="mt-auto flex flex-col gap-2 pt-4 border-t border-[var(--border-subtle)]">
-        <NavLink
-          to="/settings"
-          className={({ isActive }) =>
-            `flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
-              isActive
-                ? "bg-[color-mix(in_srgb,var(--brand-primary)_10%,transparent)] text-[var(--brand-primary)]"
-                : "text-[var(--text-secondary)] hover:bg-white/5 hover:text-[var(--text-primary)]"
-            }`
-          }
-        >
+      <div className="mt-auto flex flex-col gap-0.5 px-4 py-4 border-t border-[var(--border-subtle)]">
+        <NavLink to="/settings" className={linkClass}>
           <span className="w-[18px] shrink-0 flex items-center justify-center"><SettingsIcon /></span>
           Settings
         </NavLink>
         {/* Static, decorative — not wired to a real page */}
-        <span className="flex items-center gap-2 px-3 py-2 rounded-md text-sm text-[var(--text-muted)] cursor-default">
+        <span className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[var(--text-muted)] cursor-default">
           <span className="w-[18px] shrink-0 flex items-center justify-center"><DocumentationIcon /></span>
           Documentation
         </span>

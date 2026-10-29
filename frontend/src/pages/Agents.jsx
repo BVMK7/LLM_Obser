@@ -104,7 +104,7 @@ export default function Agents() {
                 <tr key={c.agent_id || "unattributed"} className="border-b border-[var(--border-subtle)] last:border-0">
                   <td className="py-2.5 text-[var(--text-primary)]">
                     {c.agent_name}
-                    <div className="h-1 rounded-full bg-white/5 overflow-hidden mt-1 w-32">
+                    <div className="h-1 rounded-full bg-[var(--surface-muted)] overflow-hidden mt-1 w-32">
                       <div
                         className="h-full rounded-full bg-[var(--brand-primary)]"
                         style={{ width: `${Math.max(2, (c.total_cost / maxCost) * 100)}%` }}
@@ -145,7 +145,7 @@ export default function Agents() {
             <button
               type="button"
               onClick={stop}
-              className="px-4 py-1.5 rounded-lg bg-white/5 text-[var(--text-secondary)] text-sm font-medium hover:bg-white/10 transition-colors"
+              className="px-4 py-1.5 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] text-sm font-medium hover:bg-[var(--hover-overlay)] transition-colors"
             >
               Stop
             </button>

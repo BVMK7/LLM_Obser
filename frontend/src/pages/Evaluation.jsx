@@ -377,7 +377,7 @@ export default function Evaluation() {
             <button
               onClick={handleSaveAsDataset}
               disabled={validCases.length === 0}
-              className="text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)] hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              className="text-xs px-2.5 py-1 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:bg-[var(--hover-overlay)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               Save as Dataset
             </button>
@@ -443,7 +443,7 @@ export default function Evaluation() {
         <div className="flex items-center gap-3">
           <button
             onClick={addCase}
-            className="px-3 py-1.5 rounded-lg bg-white/5 text-[var(--text-secondary)] text-sm hover:bg-white/10 transition-colors"
+            className="px-3 py-1.5 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] text-sm hover:bg-[var(--hover-overlay)] transition-colors"
           >
             + Add case
           </button>
@@ -514,13 +514,13 @@ export default function Evaluation() {
               </button>
               <button
                 onClick={handleExportCSV}
-                className="text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)] hover:bg-white/10 transition-colors"
+                className="text-xs px-2.5 py-1 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:bg-[var(--hover-overlay)] transition-colors"
               >
                 Export CSV
               </button>
               <button
                 onClick={handleExportJSON}
-                className="text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)] hover:bg-white/10 transition-colors"
+                className="text-xs px-2.5 py-1 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:bg-[var(--hover-overlay)] transition-colors"
               >
                 Export JSON
               </button>

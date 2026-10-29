@@ -230,7 +230,7 @@ export default function Scorers() {
               key={s.id}
               onClick={() => selectScorer(s.id)}
               className={`w-full text-left px-3 py-2 rounded-lg mb-1 transition-colors ${
-                s.id === selectedId ? "bg-[var(--brand-primary)]" : "hover:bg-white/5"
+                s.id === selectedId ? "bg-[var(--brand-primary)]" : "hover:bg-[var(--hover-overlay)]"
               }`}
             >
               <div className={`text-sm truncate ${s.id === selectedId ? "text-white" : "text-[var(--text-primary)]"}`}>
@@ -278,7 +278,7 @@ export default function Scorers() {
                   {detail.id && (
                     <button
                       onClick={handleDelete}
-                      className="text-xs px-2.5 py-1.5 rounded-lg bg-white/5 text-[var(--brand-danger)] hover:bg-white/10 transition-colors"
+                      className="text-xs px-2.5 py-1.5 rounded-lg bg-[var(--surface-muted)] text-[var(--brand-danger)] hover:bg-[var(--hover-overlay)] transition-colors"
                     >
                       Delete
                     </button>
@@ -351,7 +351,7 @@ export default function Scorers() {
                   </div>
                   <button
                     onClick={addChoice}
-                    className="px-3 py-1.5 rounded-lg bg-white/5 text-[var(--text-secondary)] text-sm hover:bg-white/10 transition-colors mb-4"
+                    className="px-3 py-1.5 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] text-sm hover:bg-[var(--hover-overlay)] transition-colors mb-4"
                   >
                     + Add choice
                   </button>

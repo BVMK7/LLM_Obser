@@ -173,7 +173,7 @@ export default function Overview() {
                   <span className="flex items-center gap-2">
                     <span
                       className={`w-1.5 h-1.5 rounded-full inline-block ${
-                        trace.status === "error" ? "bg-[var(--brand-danger)]" : "bg-white/40"
+                        trace.status === "error" ? "bg-[var(--brand-danger)]" : "bg-[var(--text-muted)]"
                       }`}
                     />
                     {extractProvider(trace.name)}

@@ -33,10 +33,10 @@ import Incidents from "./pages/Incidents";
 function AuthenticatedApp() {
   const { theme } = usePlatformTheme();
   return (
-    <div className="flex flex-col h-screen app-shell" data-theme={theme}>
-      <Topbar />
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+    <div className="flex h-screen app-shell" data-theme={theme}>
+      <Sidebar />
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <Topbar />
         <main className="flex-1 overflow-y-auto p-6">
           <Routes>
             <Route path="/" element={<Overview />} />

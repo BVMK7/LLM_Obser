@@ -226,7 +226,7 @@ export default function Traces() {
                 key={trace.id}
                 onClick={() => setSelectedId(trace.id)}
                 className={`w-full text-left px-3 py-2 rounded-lg mb-1 transition-colors ${
-                  trace.id === selectedId ? "bg-[var(--brand-primary)]" : "hover:bg-white/5"
+                  trace.id === selectedId ? "bg-[var(--brand-primary)]" : "hover:bg-[var(--hover-overlay)]"
                 }`}
               >
                 <div className={`text-sm truncate ${trace.id === selectedId ? "text-white" : "text-[var(--text-primary)]"}`}>

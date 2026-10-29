@@ -350,7 +350,7 @@ function ChartsTab({ aggregates, allScoreKeys }) {
               return (
                 <div key={row.provider} className="flex items-center gap-3">
                   <span className="text-xs text-[var(--text-secondary)] capitalize w-20 shrink-0">{row.provider}</span>
-                  <div className="h-2 flex-1 bg-white/5 rounded-full overflow-hidden">
+                  <div className="h-2 flex-1 bg-[var(--surface-muted)] rounded-full overflow-hidden">
                     <div
                       className="h-full rounded-full bg-[var(--brand-primary)]"
                       style={{ width: `${Math.min(100, Math.max(0, (value || 0) * 100))}%` }}

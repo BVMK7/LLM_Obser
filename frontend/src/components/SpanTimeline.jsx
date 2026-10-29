@@ -51,7 +51,7 @@ export default function SpanTimeline({ trace }) {
           <span className="text-[var(--text-primary)] font-medium">Total Trace Duration</span>
           <span className="text-[var(--text-muted)]">{formatDuration(trace.started_at, trace.ended_at)}</span>
         </div>
-        <div className="h-2.5 bg-white/5 relative overflow-hidden">
+        <div className="h-2.5 bg-[var(--surface-muted)] relative overflow-hidden">
           <div className="h-full absolute top-0 left-0 w-full" style={{ backgroundColor: "var(--brand-primary)" }} />
         </div>
       </div>
@@ -82,7 +82,7 @@ export default function SpanTimeline({ trace }) {
                 {openEnded ? "still open" : formatDuration(span.started_at, span.ended_at)}
               </span>
             </div>
-            <div className="h-2 bg-white/5 relative overflow-hidden">
+            <div className="h-2 bg-[var(--surface-muted)] relative overflow-hidden">
               <div
                 className={`h-full absolute top-0 ${openEnded ? "opacity-50" : ""}`}
                 style={{

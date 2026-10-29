@@ -148,7 +148,7 @@ export default function Incidents() {
                     <button
                       onClick={() => handleTransition(inc.id, "acknowledged")}
                       disabled={transitioningId === inc.id}
-                      className="text-xs px-2.5 py-1 rounded-lg bg-white/5 text-[var(--text-secondary)] hover:bg-white/10 disabled:opacity-40 transition-colors"
+                      className="text-xs px-2.5 py-1 rounded-lg bg-[var(--surface-muted)] text-[var(--text-secondary)] hover:bg-[var(--hover-overlay)] disabled:opacity-40 transition-colors"
                     >
                       Acknowledge
                     </button>
@@ -196,7 +196,7 @@ export default function Incidents() {
                   >
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className="inline-block text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded font-medium bg-white/5 text-[var(--text-secondary)]">
+                        <span className="inline-block text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded font-medium bg-[var(--surface-muted)] text-[var(--text-secondary)]">
                           {SOURCE_LABELS[s.source_type] || s.source_type}
                         </span>
                         <span className="text-[11px] text-[var(--text-muted)]">{formatTimestamp(s.created_at)}</span>
