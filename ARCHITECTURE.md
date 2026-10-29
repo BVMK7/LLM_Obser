@@ -1,9 +1,10 @@
-# Architecture Notes
+# Architecture Notes — InferenceIQ
 
 Running log of the significant design decisions behind each phase of this
 platform's evolution from an LLM observability tool into a full AgentOps/
-AIOps platform. Each phase gets its own section, appended below the last —
-read top to bottom for the history, or jump to the phase you care about.
+AIOps platform, now branded InferenceIQ. Each phase gets its own section,
+appended below the last — read top to bottom for the history, or jump to
+the phase you care about.
 
 ## Phase 1 — AgentOps Core
 

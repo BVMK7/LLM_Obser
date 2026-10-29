@@ -1,6 +1,10 @@
-# LLM Observability & Evaluation Platform
+# InferenceIQ
 
-A lightweight, self-hosted LLM observability platform for engineering teams: log every LLM call as a trace, inspect it step by step, and judge whether the answer was any good — all from one shared dashboard, without needing a hosted third-party platform or a large stack.
+**LLM and agent observability: trace it, evaluate it, trust it.**
+
+A self-hosted LLM and agent observability platform for engineering teams: log every LLM call as a trace, inspect it step by step, and judge whether the answer was any good — all from one shared dashboard, without needing a hosted third-party platform or a large stack.
+
+*(Note: this document describes the project as of its original single-provider build. It predates the multi-tenant SaaS, AgentOps, and governance features added since — see `ARCHITECTURE.md` for the current state.)*
 
 ---
 

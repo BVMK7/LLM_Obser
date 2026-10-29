@@ -25,8 +25,8 @@ def run_query(sql, params=None):
     return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
 
 
-st.set_page_config(page_title="LLM Observability", layout="wide")
-st.title("LLM Observability Dashboard")
+st.set_page_config(page_title="InferenceIQ", layout="wide")
+st.title("InferenceIQ Dashboard")
 
 # 2. Fetch all rows from "traces" and load them into a table (a DataFrame).
 traces_df = run_query("SELECT * FROM traces ORDER BY started_at DESC")

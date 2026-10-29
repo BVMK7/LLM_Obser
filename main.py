@@ -1312,7 +1312,7 @@ async def lifespan(app: FastAPI):
                 pass
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="InferenceIQ API", lifespan=lifespan)
 
 # Allow the React dashboard to call this API. FRONTEND_ORIGINS is a
 # comma-separated list (env-driven so a deployed frontend origin — not just

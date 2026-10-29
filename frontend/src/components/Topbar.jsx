@@ -41,7 +41,7 @@ export default function Topbar() {
             <LampIcon className="w-5 h-5" />
           </div>
           <div>
-            <div className="font-semibold text-sm text-[var(--text-primary)] leading-tight">Observability</div>
+            <div className="font-semibold text-sm text-[var(--text-primary)] leading-tight">InferenceIQ</div>
             <div className="text-[10px] text-[var(--text-muted)] leading-tight">Powered by Tao Digital</div>
           </div>
         </div>
